@@ -484,8 +484,8 @@ $$
 
 ```bash
 # 1. 克隆代码仓库
-git clone https://github.com/your-repo/XianErYiJian.git
-cd XianErYiJian
+git clone https://github.com/Yao-Shun-Ya/MGD_Project.git
+cd MGD_Project
 
 # 2. 创建并激活独立的虚拟环境 (强烈建议)
 python -m venv venv
@@ -510,7 +510,7 @@ python app.py
 请严格按照以下路径将其放入您的本地项目中，并与 `app.py` 处于同级目录：
 
 ```text
-XianErYiJian_Project/
+MGD_Project/
  ├── app.py
  ├── data_loader.py
  ├── style.css
@@ -547,11 +547,11 @@ XianErYiJian_Project/
 ```bibtex
 @misc{huang2026xianeryijian,
   author = {Yupu Huang},
-  title = {XianErYiJian: Sub-pixel Deep Learning Platform for Meibomian Gland Dysfunction Quantification with Advanced Visualization and Test-Time Augmentation},
+  title = {MGD_Project: Sub-pixel Deep Learning Platform for Meibomian Gland Dysfunction Quantification with Advanced Visualization and Test-Time Augmentation},
   year = {2026},
   publisher = {GitHub},
   journal = {GitHub repository},
-  howpublished = {\url{https://github.com/Yao-Shun-Ya/Xian-Er-Yi-Jian-Web}}
+  howpublished = {\url{https://github.com/Yao-Shun-Ya/MGD_Project}}
 }
 ```
 
