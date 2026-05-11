@@ -3,16 +3,25 @@
   <p><b>基于亚像素级全尺度 U-Net 与谱学特征的睑板腺 (MGD) 影像全自动定量分析开源平台 v2.0</b></p>
   
   <p>
+    <a href="https://xianeryijian.icu/"><img src="https://img.shields.io/badge/Website-xianeryijian.icu-0088F8?style=for-the-badge&logo=world-wide-web&logoColor=white" alt="Website"></a>
+    <a href="https://github.com/Yao-Shun-Ya/MGD_Project"><img src="https://img.shields.io/badge/GitHub-MGD_Project-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
     <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=for-the-badge&logo=PyTorch&logoColor=white" alt="PyTorch"></a>
     <a href="https://nextjs.org/"><img src="https://img.shields.io/badge/Next.js-black?style=for-the-badge&logo=next.js&logoColor=white" alt="Next.js"></a>
     <a href="https://opencv.org/"><img src="https://img.shields.io/badge/OpenCV-4.8.0-green.svg?style=for-the-badge&logo=OpenCV&logoColor=white" alt="OpenCV"></a>
-    <a href="https://github.com/facebookresearch/xformers"><img src="https://img.shields.io/badge/MONAI-1.5.0-blue.svg?style=for-the-badge" alt="MONAI"></a>
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge" alt="License">
     <img src="https://img.shields.io/badge/Version-v2.1.0--Pro-success.svg?style=for-the-badge" alt="Version">
   </p>
 
   <p>
     <em>专为眼科临床医生与医学影像研究人员打造的开箱即用 WebUI 级终端解决方案。<br>实现红外光谱影像中睑板腺形态的 100% 自动化、高精度分割与多维形态学临床量化。</em>
+  </p>
+</div>
+
+<div align="center">
+  <p>
+    <a href="https://xianeryijian.icu/">
+      <img src="https://img.shields.io/badge/🚀_点击访问项目官网-0088F8?style=for-the-badge&logo=internet-explorer&logoColor=white" alt="访问官网">
+    </a>
   </p>
 </div>
 
@@ -527,6 +536,11 @@ MGD_Project/
 - **Lead Developer & Researcher**: 黄宇普 (Huang Yupu)
 - **Organization**: NSMC XIANERYIJIAN TEAM
 - **Contact**: 2720356281@QQ.COM
+
+### 相关仓库与项目官网
+- 🌐 **项目官网**: [https://xianeryijian.icu](https://xianeryijian.icu)
+- 🧠 **深度学习引擎仓库**: [https://github.com/Yao-Shun-Ya/MGD_Project](https://github.com/Yao-Shun-Ya/MGD_Project)
+- 🌐 **前端网站仓库**: [https://github.com/Yao-Shun-Ya/Xian-Er-Yi-Jian-Web](https://github.com/Yao-Shun-Ya/Xian-Er-Yi-Jian-Web)
 
 ### 参考文献
 - [1] Lemp MA, Crewes LA, Bron AJ, et al. The definition and classification of dry eye disease. *Ocul Surf.* 2007;5(2):75-92.
