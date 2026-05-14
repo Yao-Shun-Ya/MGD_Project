@@ -27,7 +27,11 @@
 
 ---
 
-## 📑 目录 (Table of Contents)
+<details>
+<summary>
+    <h2 style="display:inline">📑 目录 (Table of Contents)</h2>
+</summary>
+
 1. [临床背景与谱学痛点 (Background)](#1-临床背景与谱学痛点-background)
     - [传统临床诊断的致命痛点](#传统临床诊断的致命痛点)
     - [“腺而易见”解决方案](#腺而易见解决方案)
@@ -119,6 +123,8 @@
     - [参考文献](#参考文献)
     - [开源协议](#开源协议)
     - [如何引用](#如何引用)
+
+</details>
 
 ---
 
