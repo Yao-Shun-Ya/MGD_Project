@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", default=None, choices=profile_names(),
                         help="预设：academic（学术档） / quick（快速试跑） / lowvram（低显存）")
     parser.add_argument("--vram", default="auto",
-                        help="显存档位：auto / 6 / 8 / 12 / 16 / 24 / 40")
+                        help="显存档位：auto / 6 / 8 / 12 / 16 / 24 / 32 / 40")
     parser.add_argument("--set", action="append", default=[], metavar="A.B=C",
                         help="按 schema 覆盖任意参数，可重复")
     parser.add_argument("--resume", default=None, help="断点续训：run 目录 / checkpoints / .mgd.ckpt")

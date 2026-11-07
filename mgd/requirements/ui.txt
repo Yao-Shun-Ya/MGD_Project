@@ -1,2 +1,2 @@
 # WebUI 端（仅 Windows）专用：Linux 只训练交付不安装
-gradio==6.12.0
+gradio==6.16.0

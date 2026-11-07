@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ui = ["gradio==6.12.0"]
+ui = ["gradio==6.16.0"]
 pdf = ["weasyprint>=62,<63"]
 dev = ["pytest>=7", "pytest-timeout>=2"]
 # 训练/推理后端二选一（实际安装需配合官方 wheel 源，见 RUNBOOK）

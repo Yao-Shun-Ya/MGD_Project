@@ -5,7 +5,7 @@ cd /d "%~dp0"
 
 if not defined MGD_PYTHON set "MGD_PYTHON=%~dp0venv\Scripts\python.exe"
 if exist "%MGD_PYTHON%" (
-  "%MGD_PYTHON%" -c "import torch,monai,gradio,cv2" >nul 2>&1
+  "%MGD_PYTHON%" -c "import torch,monai,gradio,cv2; from packaging.version import Version; raise SystemExit(0 if Version(gradio.__version__) >= Version('6.16.0') else 1)" >nul 2>&1
   if not errorlevel 1 (
     echo [OK] Dependencies already installed.
     if not defined MGD_NO_PAUSE pause

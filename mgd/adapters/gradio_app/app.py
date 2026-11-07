@@ -77,7 +77,7 @@ WORK_LOCK = threading.Lock()
 _TTA_CHOICES = [TTA_OFF, TTA_2X, TTA_4X]
 _SCOPE_CHOICES = ["Test（独立测试集）", "Val（验证集）", "Train（训练集自评）"]
 _SPLIT_CHOICES = ["Holdout 70/15/15", "K 折交叉验证"]
-_VRAM_CHOICES = ["auto", "6", "8", "12", "16", "24", "40"]
+_VRAM_CHOICES = ["auto", "6", "8", "12", "16", "24", "32", "40"]
 
 CSS = """
 :root {
@@ -133,13 +133,26 @@ body, .gradio-container, .app {
   background: var(--mgd-panel) !important; border: 1px solid var(--mgd-line) !important;
   border-radius: 10px !important;
 }
-input, textarea, select, .gr-input, .gr-dropdown {
+input:not([type="radio"]):not([type="checkbox"]):not([type="range"]):not([type="file"]),
+textarea, select, .gr-input, .gr-dropdown {
   background: #12151a !important; color: var(--mgd-text) !important;
   border: 1px solid #303944 !important; border-radius: 8px !important;
 }
-input:focus, textarea:focus, select:focus, .gr-input:focus-within {
+input:not([type="radio"]):not([type="checkbox"]):not([type="range"]):not([type="file"]):focus,
+textarea:focus, select:focus, .gr-input:focus-within {
   outline: none !important; border-color: var(--mgd-accent) !important;
   box-shadow: 0 0 0 3px rgba(111,143,168,.18) !important;
+}
+input[type="radio"], input[type="checkbox"] {
+  accent-color: var(--mgd-accent) !important;
+  background: transparent !important;
+  border: 1px solid #46525f !important;
+  box-shadow: none !important;
+}
+input[type="radio"]:checked, input[type="checkbox"]:checked {
+  accent-color: var(--mgd-accent-soft) !important;
+  background: var(--mgd-accent) !important;
+  border-color: var(--mgd-accent) !important;
 }
 button {
   border-radius: 8px !important; border: 1px solid #333d49 !important;
@@ -162,12 +175,139 @@ table td { border-color: #262e37 !important; }
 table { overflow-x: auto !important; }
 .table-wrap, .table-container, .gr-dataframe, .dataframe { overflow-x: auto !important; max-width: 100% !important; }
 label span { color: var(--mgd-muted) !important; }
+code, kbd, samp {
+  background: #1e242c !important;
+  color: var(--mgd-text) !important;
+  border: 1px solid var(--mgd-line) !important;
+  border-radius: 5px;
+  padding: 1px 5px;
+  font-family: "Cascadia Code", "Consolas", "SFMono-Regular", monospace;
+  font-size: .92em;
+}
+pre {
+  background: #0d1117 !important;
+  color: var(--mgd-text) !important;
+  border: 1px solid var(--mgd-line) !important;
+  border-radius: 8px;
+}
 .mgd-section-title { font-size: 13px; letter-spacing: 1.2px; text-transform: uppercase;
   color: var(--mgd-accent-soft); margin: 4px 0 6px; }
 .mgd-help { font-size: 12px; color: var(--mgd-muted); line-height: 1.7; }
 .mgd-ok { color: var(--mgd-ok); }
 .mgd-warn { color: var(--mgd-warn); }
 .mgd-fail { color: var(--mgd-fail); }
+#mgd-toast-stack {
+  position: fixed; top: 84px; right: 18px; z-index: 100000;
+  display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+}
+.mgd-toast {
+  display: flex; align-items: flex-start; gap: 9px;
+  max-width: min(420px, calc(100vw - 36px)); padding: 10px 13px;
+  border: 1px solid #3d5c6c; border-radius: 10px;
+  background: rgba(24,28,34,.96); color: var(--mgd-text);
+  box-shadow: 0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06);
+  font-size: 12px; line-height: 1.5;
+  opacity: 0; transform: translateY(-6px);
+  transition: opacity .18s ease, transform .18s ease;
+  backdrop-filter: blur(10px);
+}
+.mgd-toast.show { opacity: 1; transform: translateY(0); }
+.mgd-toast-dot {
+  width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; flex: none;
+  background: var(--mgd-ok); box-shadow: 0 0 10px rgba(111,156,127,.8);
+}
+.mgd-toast-text { word-break: break-word; }
+"""
+
+
+TOAST_JS = r"""
+(() => {
+  if (window.__mgdToastInstalled) return;
+  window.__mgdToastInstalled = true;
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const labelFor = (el) => {
+    let label = clean(el.getAttribute("aria-label"));
+    if (label.startsWith("range slider for ")) label = label.slice(17);
+    if (label.startsWith("number input for ")) label = label.slice(17);
+    if (!label) {
+      const block = el.closest('.block, .form, [data-testid="block"]');
+      label = clean(
+        block?.querySelector('[data-testid="block-info"], .label-wrap, label')?.innerText || ""
+      );
+    }
+    return label;
+  };
+  const install = () => {
+    if (!document.body || document.getElementById("mgd-toast-stack")) return;
+    const stack = document.createElement("div");
+    stack.id = "mgd-toast-stack";
+    stack.setAttribute("aria-live", "polite");
+    document.body.appendChild(stack);
+    let lastMessage = "";
+    let lastAt = 0;
+    let fieldTimer = 0;
+    const show = (message) => {
+      if (!message) return;
+      const now = Date.now();
+      if (message === lastMessage && now - lastAt < 650) return;
+      lastMessage = message;
+      lastAt = now;
+      const node = document.createElement("div");
+      node.className = "mgd-toast";
+      node.setAttribute("role", "status");
+      const dot = document.createElement("span");
+      dot.className = "mgd-toast-dot";
+      const text = document.createElement("span");
+      text.className = "mgd-toast-text";
+      text.textContent = message;
+      node.append(dot, text);
+      stack.appendChild(node);
+      window.requestAnimationFrame(() => node.classList.add("show"));
+      window.setTimeout(() => {
+        node.classList.remove("show");
+        window.setTimeout(() => node.remove(), 220);
+      }, 2600);
+    };
+    const handleField = (el) => {
+      if (!el || !el.matches("input, textarea, select") || el.type === "file") return;
+      const label = labelFor(el);
+      let value = clean(el.value);
+      if (el.type === "checkbox") value = el.checked ? "开启" : "关闭";
+      if (el.type === "radio") value = clean(el.value);
+      if (!value) return;
+      show("已更新" + (label ? "：" + label + " = " : "：") + value);
+    };
+    const notifyOption = (event) => {
+      const option = event.target.closest('[role="option"]');
+      if (!option) return;
+      const chosen = clean(option.innerText).replace(/^✓\s*/, "");
+      if (chosen) show("已选择：" + chosen);
+    };
+    document.addEventListener("pointerdown", notifyOption, true);
+    document.addEventListener("click", (event) => {
+      if (event.target.closest('[role="option"]')) {
+        notifyOption(event);
+        return;
+      }
+      const button = event.target.closest("button");
+      if (!button || button.disabled) return;
+      const text = clean(button.innerText);
+      if (!text || text === "↺" || text.length > 48) return;
+      if (text.includes("▼") || text.includes("▲")) return;
+      if (["设置", "通过 API 使用", "Stop Recording"].includes(text)) return;
+      show((button.getAttribute("role") === "tab" ? "已切换：" : "已提交：") + text);
+    }, true);
+    document.addEventListener("change", (event) => handleField(event.target), true);
+    document.addEventListener("input", (event) => {
+      const el = event.target;
+      if (!el || !el.matches("input, textarea, select") || el.type === "file") return;
+      window.clearTimeout(fieldTimer);
+      fieldTimer = window.setTimeout(() => handleField(el), 180);
+    }, true);
+  };
+  if (document.body) install();
+  else document.addEventListener("DOMContentLoaded", install, { once: true });
+})();
 """
 
 
@@ -221,6 +361,7 @@ def _launch_style_kwargs(gr) -> dict:
             kwargs["head"] = (
                 "<style>html,body{background:#12151a !important;margin:0;}"
                 "body{color:#e6e9ee;}</style>"
+                "<script>" + TOAST_JS + "</script>"
             )
         return kwargs
     return {}
@@ -276,6 +417,14 @@ def _fmt(value, digits: int = 4) -> str:
 def create_app(settings: Settings | None = None):
     """构建 Gradio Blocks。仅构造，不启动。"""
     import gradio as gr
+    from packaging.version import Version
+
+    if Version(gr.__version__) < Version("6.16.0"):
+        raise RuntimeError(
+            "Gradio >= 6.16.0 is required: 6.11–6.15 freeze the browser on "
+            "Tab switches that contain a Dataframe. Run install_dependencies.bat "
+            "or pip install -U 'gradio==6.16.0'."
+        )
 
     settings = settings or get_settings()
     configure_logging(log_file=settings.log_file)
@@ -373,8 +522,6 @@ def create_app(settings: Settings | None = None):
         """套用中层预设：把预设值填进表单，用户仍可继续改。"""
         overrides = profile_overrides(profile_name)
         train = overrides.get("train", {})
-        evals = overrides.get("eval", {})
-        data = overrides.get("data", {})
         label = TRAIN_PROFILES.get(profile_name, {}).get("label", profile_name)
         note = (
             f"**已套用 {label}**：{TRAIN_PROFILES.get(profile_name, {}).get('description', '')}\n\n"
@@ -384,8 +531,6 @@ def create_app(settings: Settings | None = None):
             int(train.get("epochs", 20)),
             float(train.get("lr", 1e-4)),
             train.get("scheduler", "Cosine Annealing"),
-            str(evals.get("tta", TTA_OFF)),
-            "K 折交叉验证" if data.get("split_mode") == "kfold" else "Holdout 70/15/15",
             note,
         )
 
@@ -761,7 +906,11 @@ def create_app(settings: Settings | None = None):
                         image_input = gr.Image(type="numpy", label="红外影像")
                         model_dropdown = gr.Dropdown(choices=sorted(candidates), value=default_label,
                                                      label="模型 / 权重")
-                        tta_radio = gr.Radio(choices=_TTA_CHOICES, value=TTA_OFF, label="TTA")
+                        tta_radio = gr.Radio(
+                            choices=_TTA_CHOICES, value=TTA_OFF,
+                            label="TTA（推理期增强）",
+                            info="只在推理阶段生效；训练期数据增强在“训练 → 高级参数”里。",
+                        )
                         with gr.Accordion("后处理参数（高级）", open=False):
                             tile_infer = gr.Checkbox(value=True, label="分块推理")
                             tile_size = gr.Slider(64, 640, value=384, step=32, label="分块高度")
@@ -868,7 +1017,7 @@ def create_app(settings: Settings | None = None):
                     with gr.Row():
                         train_tile = gr.Checkbox(value=True, label="分块训练")
                         train_tile_size = gr.Slider(64, 640, value=384, step=32, label="分块高度")
-                        augmentation = gr.Checkbox(value=True, label="数据增强")
+                        augmentation = gr.Checkbox(value=True, label="训练期数据增强")
                         amp_checkbox = gr.Checkbox(value=True, label="AMP（仅 CUDA 生效）")
                         pretrained_dropdown = gr.Dropdown(choices=["auto", "none", "ade20k", "imagenet"],
                                                           value="auto", label="编码器预训练")

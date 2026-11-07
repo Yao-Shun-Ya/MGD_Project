@@ -30,7 +30,7 @@ REQUIRED_PACKAGES = {
     "scipy": "1.15.3",
     "PyYAML": ">=6,<7",
 }
-OPTIONAL_PACKAGES = {"gradio": "6.12.0", "weasyprint": ">=62,<63"}
+OPTIONAL_PACKAGES = {"gradio": "6.16.0", "weasyprint": ">=62,<63"}
 
 
 @dataclass

@@ -24,7 +24,7 @@ SCHEDULER_OPTIONS: tuple[str, ...] = (
     "Step Decay",
     "CosineAnnealingWarmRestarts",
 )
-VRAM_TIERS: tuple[str, ...] = ("auto", "6", "8", "12", "16", "24", "40")
+VRAM_TIERS: tuple[str, ...] = ("auto", "6", "8", "12", "16", "24", "32", "40")
 PRETRAINED_OPTIONS: tuple[str, ...] = ("auto", "none", "ade20k", "imagenet")
 
 
@@ -67,7 +67,7 @@ SPECS: tuple[ParamSpec, ...] = (
     ParamSpec("run", "mem_limit_gb", "mem_limit_gb", "float", None, "显存上限 (GB)",
               "给 CUDA 进程设置 per-process 上限，调试 OOM 时使用；留空不限制", minimum=0.5, advanced=True),
     ParamSpec("run", "vram_tier", "vram_tier", "enum", "auto", "显存档位",
-              "auto = 启动时探测显存并推荐；也可显式指定 6/8/12/16/24/40", choices=VRAM_TIERS),
+              "auto = 启动时探测显存并推荐；也可显式指定 6/8/12/16/24/32/40", choices=VRAM_TIERS),
     ParamSpec("run", "grad_accum_steps", "grad_accum_steps", "int", 1, "梯度累积步数",
               "等效放大 batch；显存不足时优先用它而不是减小分块", minimum=1, maximum=64,
               advanced=True),

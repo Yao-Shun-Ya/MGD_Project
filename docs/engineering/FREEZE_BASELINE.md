@@ -98,6 +98,7 @@ from mgd.core.workflow.pipeline import run_pipeline
 | 12 GB | 384×768 | 2 | 2 | 是 | 是 | 是 | 关闭 | 估算 | 8 GB 档 batch 翻倍外推 |
 | 16 GB | 512×1024 | 2 | 1 | 是 | 是 | 是 | 关闭 | 估算 | 分块 + batch 外推 |
 | 24 GB | 640×1280 | 2 | 1 | 是 | 是 | 是 | 8 倍 | 估算 | 整图 + batch 外推 |
+| 32 GB | 640×1280 | 3 | 1 | 是 | 是 | 是 | 8 倍 | 估算 | 整图 + batch 3 外推 |
 | 40 GB+ | 640×1280 | 4 | 1 | 是 | 是 | 是 | 8 倍 | 估算 | 整图 + batch 4 外推 |
 
 规则：
@@ -159,7 +160,7 @@ rng state、EMA shadow、数据签名；`--resume <run目录|checkpoints|.ckpt>`
 | matplotlib | 3.10.8 |
 | Pillow | 10.4–12.x |
 | PyYAML | 6.x |
-| gradio（可选） | 6.12.0 |
+| gradio（可选） | 6.16.0 |
 | weasyprint（可选） | 62.x（PDF 报告） |
 
 平台：

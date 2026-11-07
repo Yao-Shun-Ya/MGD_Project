@@ -1,4 +1,4 @@
-"""显存自适应档位（6 / 8 / 12 / 16 / 24 / 40+ GB）。
+"""显存自适应档位（6 / 8 / 12 / 16 / 24 / 32 / 40+ GB）。
 
 每个档位给出：分块尺寸、batch、梯度累积、AMP、channels_last、深监督、TTA。
 `evidence` 明确标注该档是**实测**还是**估算**，并写依据（吞吐 / 显存峰值 / 外推方式）。
@@ -63,6 +63,11 @@ TIERS: dict[str, VramTier] = {
         "估算", "整图 640×1280 + batch 2 外推（约 14–18 GB）；TTA 可在推理时开启",
         peak_gb=None,
     ),
+    "32": VramTier(
+        "32", "32 GB (V100 32GB / RTX 5090)", 640, 3, True, 1, True, True, "8倍增强 (多尺度+翻转)",
+        "估算", "整图 640×1280 + batch 3 外推（约 21–26 GB）；32 GB 卡保留系统余量",
+        peak_gb=None,
+    ),
     "40": VramTier(
         "40", "40 GB+ (A100 / A800)", 640, 4, True, 1, True, True, "8倍增强 (多尺度+翻转)",
         "估算", "整图 + batch 4 外推（约 26–32 GB）；未在实机验证",
@@ -113,7 +118,7 @@ def recommend_tier(vram_gb: float | None = None) -> tuple[str, str]:
         vram_gb = detect_vram_gb()
     if vram_gb is None:
         return SAFE_TIER, "未检测到 CUDA 显存（CPU 或探测失败），使用 6 GB 安全档"
-    order = ["6", "8", "12", "16", "24", "40"]
+    order = ["6", "8", "12", "16", "24", "32", "40"]
     fitting = [key for key in order if float(key) <= float(vram_gb)]
     if not fitting:
         return "6", f"显存 {vram_gb:.1f} GB 低于 6 GB，使用最小安全档"

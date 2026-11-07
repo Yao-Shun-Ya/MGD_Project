@@ -53,8 +53,8 @@ def test_set_expression_type_and_range():
         validate_payload({"train": {"epochs": 0}})
 
 
-def test_vram_tiers_cover_six_levels():
-    assert set(TIERS) == {"6", "8", "12", "16", "24", "40"}
+def test_vram_tiers_cover_seven_levels():
+    assert set(TIERS) == {"6", "8", "12", "16", "24", "32", "40"}
     for tier in TIERS.values():
         assert tier.status in ("实测", "估算")
         assert tier.basis
@@ -70,6 +70,9 @@ def test_apply_tier_sets_safe_fields():
     assert merged.deep_supervision is False
     assert info["status"] == "实测"
     assert info["peak_gb"] == 0.89
+    merged32, info32 = apply_tier(config, "32")
+    assert merged32.tile_height == 640 and merged32.batch_size == 3
+    assert info32["tier"] == "32"
     merged40, info40 = apply_tier(config, "40")
     assert merged40.tile_height == 640 and merged40.batch_size == 4
     assert info40["tier"] == "40"
@@ -86,7 +89,7 @@ def test_recommend_tier_uses_nominal_capacity():
 
 def test_tier_table_has_status_and_basis():
     rows = tier_table()
-    assert len(rows) == 6
+    assert len(rows) == 7
     assert all(row["状态"] in ("实测", "估算") for row in rows)
 
 
