@@ -763,6 +763,115 @@ outputs_mgd/study_9h/eval/summary.json
 3. 缺 `split_signature` 的评估报告判为无效。
 4. 论文/网站出现不一致时，以 `summary.json` 为准，先修注入脚本，再改文档。
 
+---
+
+## 附录 G：Model Card
+
+| 字段 | 内容 |
+|---|---|
+| 名称 | MGD-Former / MGD-PriorNet / UNet / AttentionUNet / WRCANet |
+| 版本 | `2.3.0` |
+| 任务 | 红外睑板腺影像的腺体语义分割 + 睑缘辅助分割 |
+| 输入 | 单通道灰度，640×1280，`scale01 + CLAHE(clip=0.02)` |
+| 输出 | 腺体概率图、睑缘概率图、二值 mask、形态学指标 |
+| 预期用户 | 眼科医生、医学影像研究人员、算法工程师 |
+| 预期用途 | 科研、回顾性分析、辅助定量、教学；**不是**自动诊断 |
+| 训练数据 | MGD-1K 去重 999 例，患者级 694/153/152 |
+| 主要指标 | Dice、IoU、clDice、HD95、ASSD；临床 Meiboscore 一致性 |
+| 已知限制 | 单中心/单设备、无 mm 标定、QWK 0.131、单次 holdout |
+| 伦理/隐私 | 影像不离开本地；报告与日志不写 PII |
+
+**不适用场景**：儿童、妊娠、术后特殊眼表、非 LipiView 设备、动态视频、需要毫秒级实时诊断的场景。上述场景没有验证数据，不能外推。
+
+---
+
+## 附录 H：Data Card
+
+| 字段 | 内容 |
+|---|---|
+| 名称 | MGD-1K（公开睑板腺红外影像集） |
+| 规模 | 1000 幅影像 / 320 名受试者；内容级去重后 **999 例** |
+| 患者 ID | 文件名中的数字研究编号；共 **338 个编号** |
+| 分辨率 | 原始不统一；统一到 **640×1280**，单通道 |
+| 标注 | 腺体 mask + 睑缘 mask；6 轮专家 Meiboscore |
+| 划分 | 患者级 694/153/152（239/50/49 患者） |
+| 泄漏风险 | 官方 200 例来自 166 患者；800 例中 326 例同患者；训练集含 116/166 |
+| clean-official | 60 图 / 50 患者（患者不在患者级训练集） |
+| 去重 | 内容级去重；保留 `_duplicates` 审计记录；不静默删除 |
+| 许可/使用 | 遵循原数据集许可；本仓库只提供代码与划分，不重新分发受限影像 |
+
+**标注口径**：Meiboscore 按腺体缺失率分级；不同医师/轮次存在差异。论文中的临床一致性使用 6 轮专家分级，不把单轮标签当金标准。
+
+**患者 ID  caveat**：文件名数字是研究编号，不等同于病历号；跨中心合并时不能假设编号全局唯一。
+
+---
+
+## 附录 I：评测协议
+
+### I.1 固定测试集
+
+- 使用 `data/dataset_splits.json` 的患者级 test（152 图 / 49 患者）。
+- 所有模型共享同一 test、同一预处理、同一 tiling（384×768, overlap 0.25）、同一阈值 0.7。
+- **不在 test 上调阈值、不按 test 选 epoch、不按 test 选模型**。
+- 每个结果记录 `split_signature`、权重 manifest、run_dir、tiling、TTA、threshold。
+
+### I.2 统计
+
+- Dice/IoU/clDice/HD95/ASSD 逐样本计算；空 mask 的未定义值返回 NaN 并记录原因，不用 0 冒充。
+- 均值 ± SD；bootstrap **1000** 次给 95% CI。
+- 模型配对比较用 **paired Wilcoxon**；多比较用 Holm 校正。
+- 报告均值差、CI、p 值、样本数；CI 跨 0 时写“可比”，不写“胜出”。
+
+### I.3 泄漏审计
+
+- 文件清单签名：`6bdacfb0…`（数据集有没有变）。
+- 实际派分签名：`7a6fd581…`（这次到底用了哪份划分）。
+- 官方 200 例只作为审计对象；clean-official 子集单独报告。
+- 泄漏对照（patient-level vs image-level leaky）必须同预算、同 epoch 口径；本轮 0.7243 vs 0.6870，未观察到膨胀。
+
+### I.4 报告清单
+
+- [ ] 数据版本 + 文件清单签名
+- [ ] 划分模式 + split_signature
+- [ ] 权重 manifest（sha256、verified、trained_on）
+- [ ] epoch / batch / lr / EMA / AMP
+- [ ] tiling、threshold、TTA、postprocess
+- [ ] 指标定义与空 mask 处理
+- [ ] 配对检验与多重比较校正
+- [ ] 负面结果与失败病例
+
+---
+
+## 附录 J：Changelog（v2.0 → v2.3.0）
+
+| 变更 | v2.0（旧） | v2.3.0（当前） |
+|---|---|---|
+| 平台 | Windows / macOS / Linux 三套 | **Windows WebUI + Linux CLI**；macOS/MPS 移除 |
+| 默认模型 | 全尺度 U-Net | **MGD-Former（MiT-B2 + stride-4 融合解码器）** |
+| 数据划分 | 图像级/旧 699 划分 | **患者级 694/153/152（239/50/49）** |
+| 泄漏 | 未审计 | **官方 200/166、326/800、116/166、clean 60/50** |
+| 结果 | 旧口号式数字 | **2026-11 实测 + 配对检验 + 负面结果** |
+| 启动器 | 中文 `.bat` / 多平台 `init-*` | **英文 ASCII + CRLF**：`install_dependencies.bat` 等 |
+| 包 | `data/win|linux|mac` | **统一 `mgd` 代码 + 6 例演示数据** |
+| 论文 | 未注入/旧数字 | **summary.json → results.tex → PDF，0 Overfull** |
+| 测试 | 零散 | **146 项 pytest + 6 例端到端自检** |
+| 文档 | 旧版 40 KB | **本 README（含附录 A–K）** |
+
+---
+
+## 附录 K：部署前检查清单
+
+- [ ] 权重 `verified=true`，manifest 的 sha256/arch/input_size/normalization 全部匹配。
+- [ ] 评估报告带 `split_signature`，且 test 未被用于调参。
+- [ ] 数据已去标识化；日志、报告、CSV 不含患者姓名/病历号。
+- [ ] `ADMIN_PASSWORD` / `SESSION_SECRET` 已替换，未使用示例值。
+- [ ] `DATABASE_PATH` 为绝对路径；`xianeryijian.db` 已备份（含 `-wal`/`-shm`）。
+- [ ] GPU 档位与实际显存匹配；WRCANet 已开梯度检查点或排除。
+- [ ] WebUI 绑定 `127.0.0.1` 或反代；未直接暴露公网。
+- [ ] 临床免责声明可见；医生复核流程明确。
+- [ ] 回滚方案：上一版权重 + 上一版数据库 + 上一版启动器。
+- [ ] Linux 主机已跑 `bash run_self_check.sh`；Windows 已跑 `run_self_check.bat`。
+
 <div align="center">
   <b>🌟 如果这个基准、代码或负面结果对您的医学影像科研有帮助，请给项目一个 Star 🌟</b>
 </div>
