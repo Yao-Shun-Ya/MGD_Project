@@ -425,10 +425,11 @@ python -m mgd.adapters.cli.interactive
 - 英文启动器：
   - Windows：`install_dependencies.bat` / `run_self_check.bat` / `start_webui.bat` / `start_training_cli.bat`
   - Linux：`install.sh` / `run_self_check.sh` / `start_cli.sh`
+- 包内 `LICENSE`（Apache-2.0）与 `docs/engineering/` 四份工程文档；`pyproject.toml` 的 readme 目标在包内可解析。
 
 **不包含** 999 例完整数据和 99 MB 演示权重；完整数据/权重在项目主页下载区单独提供。包内 `models_weights` 为空时 WebUI 仍可启动并训练；若要直接推理，把权重放到 `models_weights/<arch>/`。
 
-> 主树与包的差别只有数据/权重体积；代码不是两套。包 README 与下载页都写明了这一点。
+> 主树与包的差别只有数据/权重体积；代码不是两套。两个包内 README 均为包专用详细版（安装、验证、结果、数据/权重、排障、许可），不是一句话说明。
 
 ---
 

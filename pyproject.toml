@@ -7,7 +7,7 @@ name = "mgd-seg"
 description = "腺而易见 · 睑板腺（MGD）红外影像智能分析（Windows WebUI + Linux CLI）"
 readme = "docs/engineering/FREEZE_BASELINE.md"
 requires-python = ">=3.10"
-license = { text = "Proprietary - internal research use" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "MGD Project Team" }]
 keywords = ["meibomian gland", "segmentation", "medical imaging", "pytorch"]
 classifiers = [
