@@ -1,0 +1,61 @@
+# 训练协议默认配置（工程冻结基线 v2.3.0）
+# 参数 schema 的唯一来源是 mgd/core/training/specs.py；本文件只是默认取值。
+# 用法：mgd-train --config <本文件> [--set a.b=c] ...
+# 未知键会被 specs.py 拒绝，避免拼写错误静默失效。
+
+run:
+  name: null                # 自定义 run 名前缀；null 自动生成 时间戳_架构_代码版本
+  output_dir: null          # null → $MGD_OUTPUT_DIR/runs
+  seed: 42
+  deterministic: true       # 固定 seed + cudnn deterministic（见 RUNBOOK 复现条件）
+  amp: true                 # 仅 CUDA 生效
+  device: null              # null → cuda > cpu；可写 cuda / cpu / cuda:0
+  num_workers: 0
+  mem_limit_gb: null        # 给 CUDA 设置 per-process 显存上限（调试用）
+  vram_tier: auto           # auto | 6 | 8 | 12 | 16 | 24 | 40（见显存档位表）
+  grad_accum_steps: 1       # 显存不足时优先加大梯度累积，而不是减小分块
+  channels_last: true       # NHWC 内存格式，卷积通常更快
+
+data:
+  split_mode: holdout       # holdout | kfold
+  val_ratio: 0.15
+  test_ratio: 0.15
+  n_folds: 5
+  fold: 0
+  tile_mode: true
+  tile_height: 384          # 384×768，实测最优分块
+  augmentation: true
+
+model:
+  name: MGD-Former          # MGD-Former（默认）| UNet | AttentionUNet | WRCANet | MGD-PriorNet
+  pretrained: auto          # auto | none | ade20k | imagenet；本地无权重时明确降级
+  dual_task: true           # 同时输出腺体与眼睑两个通道
+  eyelid_weight: 0.25
+  pos_weight: 1.0
+  deep_supervision: true    # MGD-Former 三个尺度辅助头；旧模型自动忽略
+  cldice_weight: 0.2
+  cldice_warmup: 0.1        # 前 10% 轮内线性升到目标权重
+  boundary_weight: 0.0      # 默认关闭
+  ema_decay: 0.999          # 1.0 = 关闭；评估/保存使用 EMA 权重
+
+train:
+  epochs: 20
+  batch_size: 1
+  optimizer: AdamW
+  lr: 0.0001
+  weight_decay: 0.0001
+  scheduler: "Cosine Annealing"
+  loss: "MGD 复合损失"
+  save_every: 1
+  keep_checkpoints: 3
+  resume_from: null         # 目录（自动取最新 ckpt）或具体 .mgd.ckpt 路径
+
+eval:
+  tta: "关闭"               # 关闭 | 2倍增强 (水平翻转) | 8倍增强 (多尺度+翻转)
+  threshold: 0.7
+  tile_size: 384            # 384×768 为实测最优分块（见 KNOWN_LIMITATIONS）
+  tile_overlap: 0.25
+
+artifacts:
+  publish_best: false       # true → 额外复制 best 到 $MGD_MODEL_DIR/<arch>/，会覆盖同名文件
+  export_reference_report: true   # 训练结束后生成带 split_signature 的 reference_report.json

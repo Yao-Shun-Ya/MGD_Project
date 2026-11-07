@@ -1,0 +1,77 @@
+{
+  "total_hours": 9.0,
+  "reserve_eval_seconds": 2400,
+  "experiments": [
+    {
+      "name": "mgdformer_patient",
+      "arch": "MGD-Former",
+      "epochs": 45,
+      "batch_size": 4,
+      "grad_accum_steps": 1,
+      "budget_seconds": 7200,
+      "pretrained": "auto",
+      "loss_name": "MGD 复合损失"
+    },
+    {
+      "name": "unet_patient",
+      "arch": "UNet",
+      "epochs": 30,
+      "batch_size": 4,
+      "grad_accum_steps": 1,
+      "budget_seconds": 4200,
+      "pretrained": "none",
+      "loss_name": "MGD 复合损失"
+    },
+    {
+      "name": "attention_patient",
+      "arch": "AttentionUNet",
+      "epochs": 24,
+      "batch_size": 4,
+      "grad_accum_steps": 1,
+      "budget_seconds": 4000,
+      "pretrained": "none",
+      "loss_name": "MGD 复合损失"
+    },
+    {
+      "name": "wrcanet_patient",
+      "arch": "WRCANet",
+      "epochs": 12,
+      "batch_size": 2,
+      "grad_accum_steps": 2,
+      "budget_seconds": 4500,
+      "pretrained": "none",
+      "loss_name": "MGD 复合损失"
+    },
+    {
+      "name": "priornet_patient",
+      "arch": "MGD-PriorNet",
+      "epochs": 24,
+      "batch_size": 4,
+      "grad_accum_steps": 1,
+      "budget_seconds": 4000,
+      "pretrained": "none",
+      "loss_name": "MGD 复合损失"
+    },
+    {
+      "name": "unet_no_cldice",
+      "arch": "UNet",
+      "epochs": 18,
+      "batch_size": 4,
+      "grad_accum_steps": 1,
+      "budget_seconds": 2600,
+      "pretrained": "none",
+      "loss_name": "Dice+CE 组合损失"
+    },
+    {
+      "name": "unet_official_leaky",
+      "arch": "UNet",
+      "epochs": 25,
+      "batch_size": 4,
+      "grad_accum_steps": 1,
+      "budget_seconds": 3600,
+      "pretrained": "none",
+      "loss_name": "MGD 复合损失",
+      "split_file": "data/splits/official_leaky.json"
+    }
+  ]
+}

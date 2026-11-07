@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mgd-seg"
+description = "腺而易见 · 睑板腺（MGD）红外影像智能分析（Windows WebUI + Linux CLI）"
+readme = "docs/engineering/FREEZE_BASELINE.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary - internal research use" }
+authors = [{ name = "MGD Project Team" }]
+keywords = ["meibomian gland", "segmentation", "medical imaging", "pytorch"]
+classifiers = [
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dynamic = ["version"]
+
+# 说明：PyTorch 与 gradio 不放在基础依赖里，按平台/交付端选择安装（见 docs/engineering/RUNBOOK.md）。
+# 基础依赖版本与 2026-11-07 实测环境一致。
+dependencies = [
+  "numpy==1.26.4",
+  "opencv-python>=4.8.0.74,<5",
+  "Pillow>=10.4,<13",
+  "scikit-image==0.25.2",
+  "monai>=1.5.2,<1.6",
+  "pandas==2.3.3",
+  "matplotlib==3.10.8",
+  "scipy==1.15.3",
+  "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+ui = ["gradio==6.12.0"]
+pdf = ["weasyprint>=62,<63"]
+dev = ["pytest>=7", "pytest-timeout>=2"]
+# 训练/推理后端二选一（实际安装需配合官方 wheel 源，见 RUNBOOK）
+cuda = ["torch==2.5.1"]
+cpu = ["torch==2.5.1"]
+
+[project.scripts]
+mgd-ui = "mgd.adapters.gradio_app.app:main"
+mgd-train = "mgd.adapters.cli.train_cli:main"
+mgd-verify = "mgd.core.models.verify:main"
+mgd-doctor = "mgd.core.runtime.doctor:main"
+mgd-eval = "mgd.adapters.cli.eval_cli:main"
+mgd-pipeline = "mgd.adapters.cli.pipeline_cli:main"
+mgd-data = "mgd.adapters.cli.data_cli:main"
+mgd-ablation = "mgd.ablation_runner:main"
+mgd-verify-pipeline = "mgd.verify_pipeline:main"
+
+[project.urls]
+Documentation = "docs/engineering/RUNBOOK.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "mgd.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mgd*"]
+exclude = ["mgd.tests", "mgd.tests.*"]
+
+[tool.setuptools.package-data]
+mgd = ["configs/*.yaml", "requirements/*.txt", "packaging/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["mgd/tests"]
+addopts = "-q"

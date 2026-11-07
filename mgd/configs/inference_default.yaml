@@ -1,0 +1,23 @@
+# 推理协议默认配置（工程冻结基线 v2.1.0）
+# 诊断 / 批量评估共用的默认口径，避免命令行与 UI 各写一套默认值。
+# 字段与 mgd.core.inference.service.InferenceOptions 一一对应。
+
+inference:
+  tile_infer: true
+  tile_size: 384
+  tile_overlap: 0.25
+  threshold: 0.7
+  min_area: 120
+  smooth_on: true
+  smooth_sigma: 1.2
+  roi_only: true
+  tta: "关闭"
+  auto_escalate_threshold: false
+  gradcam: false
+  review_ratio: 0.10
+
+image:
+  target_height: 640
+  target_width: 1280
+  clahe_clip_limit: 0.02
+  normalization: "scale01+clahe"

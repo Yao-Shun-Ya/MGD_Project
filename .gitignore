@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Large data / weights / runs (not in git)
+data/*
+!data/README.md
+models_weights/*
+!models_weights/README.md
+outputs/
+outputs_mgd/
+MGD1k-main/
+_transfer/
+*.pth
+*.ckpt
+*.7z
+
+# Logs and local files
+*.log
+mgd/logs/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
