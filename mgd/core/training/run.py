@@ -105,13 +105,14 @@ def create_run(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     commit = git_commit() or "nogit"
     parts = [stamp, _slug(name) if name else _slug(arch), commit, (fingerprint or "000000")[:6]]
-    run_id = "_".join(parts)
+    base_id = "_".join(parts)
+    run_id = base_id
     run_dir = root / run_id
     suffix = 1
     while run_dir.exists():
         suffix += 1
-        run_dir = root / f"{run_id}_{suffix}"
-        run_id = run_dir.name
+        run_id = f"{base_id}_{suffix}"
+        run_dir = root / run_id
     run_dir.mkdir(parents=True)
     return RunContext(run_id=run_id, run_dir=run_dir, checkpoints_dir=run_dir / "checkpoints")
 
@@ -195,10 +196,23 @@ def resolve_resume(value: str | Path | None, checkpoints_dir: Path) -> Path | No
 
 
 def publish_best(best_path: Path, target: Path) -> None:
-    """把 run 目录里的 best 权重发布到 model_dir；仅在显式要求时调用。"""
+    """把 run 目录里的 best 权重发布到 model_dir；仅在显式要求时调用。
+
+    原子替换：先写临时文件再 os.replace，避免复制中断留下半截权重
+    （以及“新权重 + 旧 manifest”的中间窗口）。
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(best_path, target)
-    sidecar = best_path.with_name(best_path.name + ".manifest.json")
-    if sidecar.is_file():
-        shutil.copy2(sidecar, target.with_name(target.name + ".manifest.json"))
+    weight_tmp = target.with_name(target.name + ".publishing.tmp")
+    manifest_tmp = target.with_name(target.name + ".manifest.json.publishing.tmp")
+    try:
+        shutil.copy2(best_path, weight_tmp)
+        sidecar = best_path.with_name(best_path.name + ".manifest.json")
+        if sidecar.is_file():
+            shutil.copy2(sidecar, manifest_tmp)
+        os.replace(weight_tmp, target)
+        if manifest_tmp.is_file():
+            os.replace(manifest_tmp, target.with_name(target.name + ".manifest.json"))
+    finally:
+        weight_tmp.unlink(missing_ok=True)
+        manifest_tmp.unlink(missing_ok=True)
     logger.info("已发布 best 权重到 %s", target)

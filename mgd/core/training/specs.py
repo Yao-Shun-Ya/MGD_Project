@@ -14,7 +14,7 @@ from typing import Any
 from ..runtime.errors import ConfigError
 
 #: 分节顺序同时决定 UI 中「高级参数」的展示顺序
-SECTIONS: tuple[str, ...] = ("run", "data", "model", "train", "eval", "artifacts")
+SECTIONS: tuple[str, ...] = ("run", "data", "model", "train", "eval", "infer", "artifacts")
 
 TTA_OPTIONS: tuple[str, ...] = ("关闭", "2倍增强 (水平翻转)", "8倍增强 (多尺度+翻转)")
 OPTIMIZER_OPTIONS: tuple[str, ...] = ("AdamW", "Adam", "SGD")
@@ -63,7 +63,7 @@ SPECS: tuple[ParamSpec, ...] = (
     ParamSpec("run", "device", "device", "str", None, "设备",
               "留空 → 自动 cuda > cpu；也可写 cuda / cpu / cuda:0", advanced=True),
     ParamSpec("run", "num_workers", "num_workers", "int", 0, "DataLoader 线程数",
-              "Windows 建议 0；Linux 可设 4–8", minimum=0, maximum=32, advanced=True),
+              "变换已可 pickle，Windows 也可设 2–8；0 = 主进程加载", minimum=0, maximum=32, advanced=True),
     ParamSpec("run", "mem_limit_gb", "mem_limit_gb", "float", None, "显存上限 (GB)",
               "给 CUDA 进程设置 per-process 上限，调试 OOM 时使用；留空不限制", minimum=0.5, advanced=True),
     ParamSpec("run", "vram_tier", "vram_tier", "enum", "auto", "显存档位",
@@ -91,6 +91,9 @@ SPECS: tuple[ParamSpec, ...] = (
               "宽度固定为高度的 2 倍（保持 2:1 宽高比）；384 → 384×768", minimum=64, maximum=640),
     ParamSpec("data", "augmentation", "augmentation", "bool", True, "数据增强",
               "水平翻转 + 亮度/对比度扰动；不启用垂直翻转（腺体走向不对称）"),
+    ParamSpec("data", "physical_scale_mm_per_px", "physical_scale_mm_per_px", "float", None,
+              "物理标定 (mm/px)",
+              "影像的 mm/px 标定；None = 未标定，长度/距离类指标保持像素单位并明确标注", advanced=True),
 
     # ---------------- model ----------------
     ParamSpec("model", "name", "model_name", "str", "MGD-Former", "模型",
@@ -146,6 +149,16 @@ SPECS: tuple[ParamSpec, ...] = (
               "384 为实测最优；整图推理会显著掉 Dice", minimum=64, maximum=640),
     ParamSpec("eval", "tile_overlap", "eval_tile_overlap", "float", 0.25, "推理分块重叠",
               "", minimum=0.0, maximum=0.9),
+    ParamSpec("eval", "conformal_alpha", "conformal_alpha", "float", 0.10, "共形校准 1-α 覆盖",
+              "split conformal 的目标误覆盖率 α；校准样本数需 ≥ 1/α", minimum=0.01, maximum=0.5,
+              advanced=True),
+
+    # ---------------- infer（v2.4.0 新增段：诊断中心级推理参数） ----------------
+    ParamSpec("infer", "qc_policy", "qc_policy", "str", "default", "质控策略",
+              "qc/quality 的阈值组策略名；default = 工程默认（未经临床标定，见 KNOWN_LIMITATIONS）"),
+    ParamSpec("infer", "explain_method", "explain_method", "enum", "off", "解释方法",
+              "layercam / scorecam / occlusion 之一；off = 不计算归因（概率伪彩不是归因）",
+              choices=("off", "layercam", "scorecam", "occlusion")),
 
     # ---------------- artifacts ----------------
     ParamSpec("artifacts", "publish_best", "publish_best", "bool", False, "发布 best 权重",
@@ -193,6 +206,9 @@ def coerce_value(spec: ParamSpec, value: Any, *, where: str | None = None) -> An
                 return value.strip().lower() in ("1", "true", "yes", "on", "是")
             return bool(value)
         if spec.kind == "int":
+            # 浮点输入必须整值：静默截断会让 YAML 与 --set 两个入口行为分叉
+            if isinstance(value, float) and not float(value).is_integer():
+                raise ConfigError(f"{place} 的值 {value!r} 不是整数")
             result: Any = int(value)
         elif spec.kind == "float":
             result = float(value)
@@ -200,6 +216,12 @@ def coerce_value(spec: ParamSpec, value: Any, *, where: str | None = None) -> An
             result = str(value)
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"{place} 的值 {value!r} 无法转换为 {spec.kind}") from exc
+
+    # NaN 绕过一切范围比较（nan < x 恒为 False），会让训练静默空转，必须显式拒绝
+    if spec.kind == "float" and result != result:
+        raise ConfigError(f"{place} 不能为 NaN")
+    if isinstance(result, (int, float)) and spec.kind in ("int", "float") and result != result:
+        raise ConfigError(f"{place} 不能为 NaN")
 
     if spec.kind == "enum" and spec.choices and result not in spec.choices:
         raise ConfigError(

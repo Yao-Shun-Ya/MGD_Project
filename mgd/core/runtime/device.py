@@ -18,16 +18,27 @@ def resolve_device(override: str | None = None) -> torch.device:
     """解析运行设备。
 
     override 为空时按 cuda > cpu 顺序探测；环境变量 MGD_DEVICE 优先于自动探测。
+    支持 cuda / cpu / cuda:N（N 必须小于可见卡数）；macOS/MPS 不在交付范围。
     """
     requested = (override or os.environ.get("MGD_DEVICE") or "").strip().lower()
     if requested:
-        if requested not in _VALID:
+        base = requested.split(":", 1)[0]
+        if base not in _VALID or (base == "cuda" and ":" in requested
+                                  and not requested.split(":", 1)[1].isdigit()):
             raise DeviceError(
                 f"未知设备 {requested!r}",
-                hint=f"可选值：{', '.join(_VALID)}",
+                hint="可选值：cuda / cpu / cuda:N（N 为显卡序号）",
             )
-        if requested == "cuda" and not torch.cuda.is_available():
-            raise DeviceError("显式指定 CUDA，但当前环境不可用", hint="改用 MGD_DEVICE=cpu 或安装 CUDA 版 torch")
+        if base == "cuda":
+            if not torch.cuda.is_available():
+                raise DeviceError("显式指定 CUDA，但当前环境不可用", hint="改用 MGD_DEVICE=cpu 或安装 CUDA 版 torch")
+            if ":" in requested:
+                index = int(requested.split(":", 1)[1])
+                if index >= torch.cuda.device_count():
+                    raise DeviceError(
+                        f"显卡序号 {index} 不存在（当前 {torch.cuda.device_count()} 张可见）",
+                        hint="用 nvidia-smi 确认卡号，或直接写 cuda",
+                    )
         return torch.device(requested)
 
     if torch.cuda.is_available():

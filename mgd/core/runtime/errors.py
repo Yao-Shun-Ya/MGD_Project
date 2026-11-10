@@ -44,3 +44,10 @@ class InferenceError(MGDError):
 
 class TrainingError(MGDError):
     """训练过程失败。"""
+
+
+class InteropDependencyError(MGDError):
+    """互操作可选依赖（pydicom / highdicom 等）未安装。
+
+    消息必须包含可执行的安装命令；禁止用 `except: pass` 静默吞掉导入失败。
+    """

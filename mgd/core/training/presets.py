@@ -145,7 +145,11 @@ def get_tier(key: str | None, vram_gb: float | None = None) -> tuple[VramTier, s
 
 
 def apply_tier(config: TrainConfig, tier_key: str | None, vram_gb: float | None = None) -> tuple[TrainConfig, dict[str, Any]]:
-    """把档位作用到配置；显式设置过的 tile/batch 等仍会以档位为准（档位就是安全边界）。"""
+    """把档位作用到配置（安全默认）。
+
+    注意调用方次序（train_cli）：apply_tier 之后 `_reapply_explicit` 会把
+    `--set` / 快捷参数再落一次，即显式覆盖高于档位；突破档位的显存风险由使用者自负。
+    """
     tier, reason = get_tier(tier_key, vram_gb)
     merged = replace(
         config,

@@ -1,0 +1,154 @@
+{
+  "generated_at": "2026-11-10T07:47:08",
+  "project_root": "C:\\Users\\27203\\Desktop\\total-bundle\\MGD_Project",
+  "passed": 18,
+  "total": 18,
+  "total_checks": 432,
+  "total_seconds": 90.04,
+  "results": [
+    {
+      "ok": true,
+      "name": "g01_syntax_compile",
+      "details": "扫描 mgd/ 源文件 151 个（含 tests），compileall 退出码 0",
+      "checks": 3,
+      "failed": [],
+      "elapsed_s": 1.01
+    },
+    {
+      "ok": true,
+      "name": "g02_todo_scan",
+      "details": "扫描 114 个文件 × 6 类标记，命中 0 处；tests/ 目录按规豁免",
+      "checks": 8,
+      "failed": [],
+      "elapsed_s": 0.55
+    },
+    {
+      "ok": true,
+      "name": "g03_metric_registry_integrity",
+      "details": "16 个指标；实际使用的 source：['Arita et al. 2008', 'Pult & Nichols 2016', 'engine-defined']",
+      "checks": 131,
+      "failed": [],
+      "elapsed_s": 4.38
+    },
+    {
+      "ok": true,
+      "name": "g04_nan_discipline",
+      "details": "裸吞扫描 40 文件；json 调用点 5 处（合规 5，豁免依据：allow_nan=False / 函数级 sanitize）",
+      "checks": 5,
+      "failed": [],
+      "elapsed_s": 0.27
+    },
+    {
+      "ok": true,
+      "name": "g05_core_no_ui",
+      "details": "core 文件 95 个；gradio/dicom/adapters 违规 0；顶层 torch 违规 0",
+      "checks": 15,
+      "failed": [],
+      "elapsed_s": 0.35
+    },
+    {
+      "ok": true,
+      "name": "g06_api_surface",
+      "details": "快照含 config 5 函数、service 4 符号+12 字段、clinical 6 符号+9 列+6 点行为、stats 4 符号、registry 4 符号、9 异常类、8 旧参数键",
+      "checks": 65,
+      "failed": [],
+      "elapsed_s": 8.64
+    },
+    {
+      "ok": true,
+      "name": "g07_test_speed",
+      "details": "pytest 墙钟 17.2s（预算 60s），退出码 0",
+      "checks": 3,
+      "failed": [],
+      "elapsed_s": 17.29
+    },
+    {
+      "ok": true,
+      "name": "g08_import_graph",
+      "details": "建图 114 文件；adapters→core 边 99 条；5 类方向断言全部执行",
+      "checks": 14,
+      "failed": [],
+      "elapsed_s": 0.38
+    },
+    {
+      "ok": true,
+      "name": "g09_specs_alignment",
+      "details": "specs 共 49 条；逐条做了 TrainConfig 字段存在性检查；伪字段豁免 1 条（run.output_dir → config_file.py 特判）",
+      "checks": 67,
+      "failed": [],
+      "elapsed_s": 6.76
+    },
+    {
+      "ok": true,
+      "name": "g10_docs_sync",
+      "details": "检查面：版本来源/形式 / 文档版本跟随与防超前（新增）/ pyproject 动态版本+dicom组+4脚本 / README 版本+4 CLI / 冻结基线 / 已知局限 5 关键词 / ADR-002..004",
+      "checks": 20,
+      "failed": [],
+      "elapsed_s": 0.09
+    },
+    {
+      "ok": true,
+      "name": "g11_forbidden_paths",
+      "details": "扫描 42 个 v2.4.0 新模块的字符串字面量；禁径词表：['models_weights', 'outputs_mgd', '_transfer', 'data/images', 'data\\\\images']；tests/ 与既有模块按规豁免",
+      "checks": 15,
+      "failed": [],
+      "elapsed_s": 0.14
+    },
+    {
+      "ok": true,
+      "name": "g12_optional_dep_discipline",
+      "details": "当前环境已安装 pydicom/highdicom：monkeypatch 模拟缺依赖 + 校验真实输入路径；缺依赖路径验证与已装路径验证双环境覆盖；真实 SEG/SR 往返由 tests/test_interop_roundtrip.py 承担",
+      "checks": 13,
+      "failed": [],
+      "elapsed_s": 2.73
+    },
+    {
+      "ok": true,
+      "name": "g13_cli_surface",
+      "details": "6 个 CLI 均以 python -m <module> 直调（venv 未装新入口 exe 时的等价路径）；帮助预算 10s/个；未知 action 走 argparse choices 拒绝",
+      "checks": 13,
+      "failed": [],
+      "elapsed_s": 30.12
+    },
+    {
+      "ok": true,
+      "name": "g14_settings_fields",
+      "details": "临时 home=C:\\Users\\27203\\AppData\\Local\\Temp\\g14_8zvt8_mh；env 注入与恢复均走 try/finally，不污染父进程环境",
+      "checks": 15,
+      "failed": [],
+      "elapsed_s": 2.2
+    },
+    {
+      "ok": true,
+      "name": "g15_report_blocks",
+      "details": "合成 64×128 影像 + 最小 Provenance/QualityReport/TypeEvidence/explain；旧调用与全参数调用双快照对照",
+      "checks": 14,
+      "failed": [],
+      "elapsed_s": 6.65
+    },
+    {
+      "ok": true,
+      "name": "g16_grading_crosscheck",
+      "details": "GRADE_SPECS=['arita_meiboscore', 'pult_meiboscale']；Arita 101 点逐点对照；Pult 401 点单调/范围扫描",
+      "checks": 9,
+      "failed": [],
+      "elapsed_s": 2.64
+    },
+    {
+      "ok": true,
+      "name": "g17_instance_columns",
+      "details": "冻结清单来自任务书 v2.4.0 交付契约；三处消费端（clinical/atlas/longitudinal）已逐列核对；summary 14 行（10 + GA/DI/TI/SI）两分支实测比对",
+      "checks": 16,
+      "failed": [],
+      "elapsed_s": 3.02
+    },
+    {
+      "ok": true,
+      "name": "g18_json_strictness",
+      "details": "三连覆盖：治理审计（读端严格）/ 图谱索引（写端净化+读端还原）/共形校准（写端拒绝）——NaN 全生命周期闭环",
+      "checks": 6,
+      "failed": [],
+      "elapsed_s": 2.82
+    }
+  ]
+}

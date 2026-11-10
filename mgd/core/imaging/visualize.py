@@ -41,9 +41,15 @@ def binary_overlay(gray_img: np.ndarray, mask: np.ndarray, color=(0, 255, 0), al
     return cv2.addWeighted(base, 1.0 - alpha, layer, alpha, 0)
 
 
-def generate_contour_visualization(prob_map: np.ndarray, gray_img: np.ndarray, min_area: int = 80) -> np.ndarray:
+def generate_contour_visualization(
+    prob_map: np.ndarray,
+    gray_img: np.ndarray,
+    min_area: int = 80,
+    threshold: float = 0.5,
+) -> np.ndarray:
     base = cv2.cvtColor(_ensure_gray_u8(gray_img), cv2.COLOR_GRAY2RGB)
-    binary = (np.asarray(prob_map) >= 0.5).astype(np.uint8)
+    # 轮廓必须与实际使用的二值化阈值一致（默认推理阈值 0.7；0.5 等值线会圈住被排除的区域）
+    binary = (np.asarray(prob_map) >= float(threshold)).astype(np.uint8)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     kept = [c for c in contours if cv2.contourArea(c) >= max(1, int(min_area))]
     cv2.drawContours(base, kept, -1, (0, 255, 120), 2)

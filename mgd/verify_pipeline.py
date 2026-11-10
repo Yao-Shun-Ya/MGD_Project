@@ -86,7 +86,11 @@ def run(samples: int = 6, epochs: int = 1, arch: str = "MGD-Former", keep: bool 
         return 1
 
     print("[2/6] 持久化 70/15/15 划分")
-    split = get_splits(index.pairs, SplitSpec(), settings)
+    try:
+        split = get_splits(index.pairs, SplitSpec(), settings)
+    except DataIntegrityError as exc:
+        print(f"      划分失败：{exc}")
+        return 1
     print(f"      train={len(split.train)} val={len(split.val)} test={len(split.test)}")
     repeat = get_splits(index.pairs, SplitSpec(), settings)
     if [p.stem for p in repeat.train] != [p.stem for p in split.train]:

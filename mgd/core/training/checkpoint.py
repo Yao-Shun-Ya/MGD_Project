@@ -98,8 +98,12 @@ def save_checkpoint(
         "ema_state": _to_cpu(ema_state) if ema_state else None,
     }
     tmp = target.with_suffix(target.suffix + ".tmp")
-    torch.save(payload, tmp)
-    tmp.replace(target)
+    try:
+        torch.save(payload, tmp)
+        tmp.replace(target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # 磁盘满/中断时不留垃圾 .tmp
+        raise
     return target
 
 
@@ -127,6 +131,17 @@ def load_checkpoint(path: str | Path, map_location="cpu") -> CheckpointState:
             epoch=0,
             legacy=True,
             path=target,
+        )
+
+    # 未来版本的检查点字段语义可能已变化，静默按旧格式解析会丢状态，必须显式拒绝
+    try:
+        stored_format = int(payload["format_version"])
+    except (TypeError, ValueError):
+        stored_format = -1
+    if stored_format > CHECKPOINT_FORMAT:
+        raise WeightLoadError(
+            f"检查点格式版本 {stored_format} 高于当前支持 {CHECKPOINT_FORMAT}，请升级 mgd 后再续训",
+            hint=str(target),
         )
 
     return CheckpointState(

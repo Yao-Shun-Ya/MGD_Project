@@ -16,10 +16,11 @@ from ..data.pairing import scan_dataset
 from ..data.splits import SplitSpec, get_splits, stems_signature
 from ..evaluation.evaluator import evaluate_pairs
 from ..evaluation.stats import reference_report_payload, write_reference_report
+from ..governance.hooks import audit_event
 from ..inference.service import InferenceOptions
 from ..models.registry import normalize_model_name
 from ..runtime.errors import MGDError
-from ..runtime.logging import get_logger
+from ..runtime.logging import bind_context, clear_context, get_logger
 from .config_file import snapshot_payload, write_snapshot
 from .engine import TrainingResult, train_iter
 from .run import (
@@ -55,6 +56,13 @@ def run_training(
     settings = settings or get_settings()
     arch = normalize_model_name(config.model_name)
     fingerprint = config_fingerprint(snapshot_payload(config, meta))
+    # resume 路径先解析：非法路径在创建 run 目录之前就失败，避免留下孤儿目录
+    resume: Path | None = None
+    if config.resume_from:
+        try:
+            resume = resolve_resume(config.resume_from, Path(".") / "checkpoints")
+        except FileNotFoundError as exc:
+            raise MGDError(f"断点续训失败：{exc}", hint="检查 --resume 指向的 run 目录或 .mgd.ckpt 路径") from exc
     context = create_run(
         settings,
         arch,
@@ -63,38 +71,70 @@ def run_training(
         fingerprint=fingerprint,
     )
     run_dir = context.run_dir
-    resume = resolve_resume(config.resume_from, context.checkpoints_dir) if config.resume_from else None
     effective = replace(config, run_dir=str(run_dir), resume_from=str(resume) if resume else None)
     meta = dict(meta)
     meta["run_id"] = context.run_id
 
-    write_snapshot(context.config_path, effective, meta)
-    write_env_snapshot(context.env_path, settings, device_text=effective.device)
-    handler = _attach_file_log(context.log_path)
-
-    started = time.perf_counter()
-    result: TrainingResult | None = None
+    # run 生命周期绑定 run_id：train_iter 之外的 snapshot / result / report 导出段同样可追溯
+    bind_context(run_id=context.run_id)
     try:
-        for event in train_iter(effective, settings):
-            if event.get("event") == "epoch":
-                append_metric(context.metrics_path, event)
-            if event.get("event") == "done":
-                result = event["result"]
-            if on_event is not None:
-                on_event(event)
+        write_snapshot(context.config_path, effective, meta)
+        write_env_snapshot(context.env_path, settings, device_text=effective.device)
+        handler = _attach_file_log(context.log_path)
+
+        started = time.perf_counter()
+        result: TrainingResult | None = None
+        try:
+            for event in train_iter(effective, settings):
+                if event.get("event") == "epoch":
+                    append_metric(context.metrics_path, event)
+                if event.get("event") == "done":
+                    result = event["result"]
+                if on_event is not None:
+                    on_event(event)
+        finally:
+            logging.getLogger("mgd").removeHandler(handler)
+
+        # train_iter 结束时引擎侧 finally 已清掉 run_id；导出段重新绑定
+        bind_context(run_id=context.run_id)
+        if result is None:
+            raise MGDError("训练未产生结果")
+        result.run_dir = str(run_dir)
+        result_dict = dict(result.__dict__)
+        result_dict["run_id"] = context.run_id
+        result_dict["wall_seconds"] = round(time.perf_counter() - started, 3)
+        write_result(context.result_path, result_dict)
+
+        # 训练产物已落盘 → 治理审计（非阻塞；payload 只含 run 级元数据，不含数据内容）
+        audit_event(
+            settings,
+            "training_done",
+            actor="system",
+            payload={
+                "run_id": context.run_id,
+                "arch": arch,
+                "epochs": int(result.epochs_run),
+                "best_metric": float(result.best_metric),
+            },
+        )
+
+        if effective.export_reference_report and result.best_weights:
+            _export_reference(context, effective, settings)
+    except Exception as exc:
+        # 训练失败同样留痕（非阻塞：审计失败不打断原有异常上抛路径）
+        audit_event(
+            settings,
+            "training_failed",
+            actor="system",
+            payload={
+                "run_id": context.run_id,
+                "arch": arch,
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise
     finally:
-        logging.getLogger("mgd").removeHandler(handler)
-
-    if result is None:
-        raise MGDError("训练未产生结果")
-    result.run_dir = str(run_dir)
-    result_dict = dict(result.__dict__)
-    result_dict["run_id"] = context.run_id
-    result_dict["wall_seconds"] = round(time.perf_counter() - started, 3)
-    write_result(context.result_path, result_dict)
-
-    if effective.export_reference_report and result.best_weights:
-        _export_reference(context, effective, settings)
+        clear_context(["run_id"])
 
     return result, context
 
@@ -139,6 +179,7 @@ def _export_reference(context: RunContext, config, settings: Settings) -> None:
             report,
             split_signature=stems_signature([pair.stem for pair in index.pairs]),
             data_signature=stems_signature([pair.stem for pair in index.pairs]),
+            assignment_signature=getattr(split, "assignment_signature", ""),
             n_bootstrap=1000,
             extra={
                 "run_id": context.run_id,

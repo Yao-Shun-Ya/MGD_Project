@@ -1,10 +1,14 @@
 """零泄漏数据集划分引擎（Phase 2）。
 
 - 固定 seed=42 的确定性划分；
+- **患者级分组**：同一患者（文件名中的 ≥6 位数字研究编号）的影像整组进入同一
+  split，杜绝患者级泄漏；没有该编号的数据集退化为图像级（每个 stem 独立）；
 - holdout：默认 Train 70% / Val 15% / Test 15%；
 - k-fold：5 折交叉验证（fold_idx=0..4），每折 test=1 折、val=下一折、其余 train；
 - 结果持久化到 `<data_dir>/dataset_splits.json`，文件列表未变时后续训练/评估
   严格复用同一划分，保证多模型对比落在同一测试集上；
+- 双签名：`signature`（文件清单）+ `assignment_signature`（实际派分），二者一起
+  才能回答「数据集有没有变」与「这次实验到底用了哪份派分」；
 - 极小样本（< 10）自动降级为安全划分，`<= 2` 时默认拒绝（空载防火墙）。
 """
 from __future__ import annotations
@@ -13,6 +17,7 @@ import hashlib
 import json
 import os
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +34,9 @@ SPLITS_FORMAT_VERSION = 1
 DEFAULT_SEED = 42
 SMALL_DATASET_THRESHOLD = 10
 MIN_DATASET_SIZE = 3
+
+#: 患者编号提取：文件名中第一个 ≥6 位连续数字；与 tools/make_patient_split.py 保持一致
+_PATIENT_ID_PATTERN = re.compile(r"(\d{6,})")
 
 
 @dataclass(frozen=True)
@@ -79,6 +87,7 @@ class SplitRecord:
     val: list[str]
     test: list[str]
     warnings: list[str] = field(default_factory=list)
+    assignment_signature: str = ""
     source: str = "computed"
 
     def as_dict(self) -> dict:
@@ -89,6 +98,7 @@ class SplitRecord:
             "val": self.val,
             "test": self.test,
             "warnings": self.warnings,
+            "assignment_signature": self.assignment_signature,
             "created_at": utc_now(),
         }
 
@@ -101,6 +111,30 @@ def stems_signature(stems: list[str]) -> str:
     """只用文件列表（basename）计算签名；列表未变则复用已有划分。"""
     payload = "\n".join(sorted(str(item) for item in stems))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def assignment_signature(train: list[str], val: list[str], test: list[str]) -> str:
+    """对实际派分（train/val/test 有序列表）计算签名；与 tools/make_patient_split.py 一致。"""
+    payload = (
+        "train:" + ",".join(sorted(train))
+        + "|val:" + ",".join(sorted(val))
+        + "|test:" + ",".join(sorted(test))
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def patient_key(stem: str) -> str:
+    """文件名中的患者编号（≥6 位数字）；没有则每个 stem 视为独立患者。"""
+    match = _PATIENT_ID_PATTERN.search(str(stem))
+    return match.group(1) if match else str(stem)
+
+
+def group_by_patient(stems: list[str]) -> list[list[str]]:
+    """按患者编号分组；返回按组键排序的成员列表（组内成员也有序，保证确定性）。"""
+    groups: dict[str, list[str]] = {}
+    for stem in stems:
+        groups.setdefault(patient_key(stem), []).append(str(stem))
+    return [sorted(members) for _, members in sorted(groups.items())]
 
 
 def splits_path(settings: Settings | None = None) -> Path:
@@ -117,11 +151,18 @@ def _split_counts(total: int, spec: SplitSpec) -> tuple[int, int]:
 
 
 def compute_holdout(stems: list[str], spec: SplitSpec) -> SplitRecord:
-    items = sorted(stems)
+    groups = group_by_patient(stems)
     rng = random.Random(int(spec.seed))
-    rng.shuffle(items)
-    total = len(items)
+    rng.shuffle(groups)
+    total = len(stems)
     warnings: list[str] = []
+
+    if len(groups) < total:
+        warnings.append(
+            f"患者级划分：{total} 例影像聚合为 {len(groups)} 名患者，同一患者的影像整组进入同一 split"
+        )
+    elif len(groups) == 1:
+        warnings.append("所有影像来自同一患者编号（或数据集没有患者编号），无法做患者级分组")
 
     if total < SMALL_DATASET_THRESHOLD:
         warnings.append(
@@ -142,9 +183,18 @@ def compute_holdout(stems: list[str], spec: SplitSpec) -> SplitRecord:
             else:
                 break
 
-    test_start = total - test_count if test_count else total
-    val_start = test_start - val_count
-    train, val, test = items[:val_start], items[val_start:test_start], items[test_start:]
+    # 按患者整组填充 train → val → test（组不可拆分，指标目标数按图像近似）
+    train_target = total - val_count - test_count
+    train: list[str] = []
+    val: list[str] = []
+    test: list[str] = []
+    for members in groups:
+        if len(train) < train_target:
+            train.extend(members)
+        elif len(val) < val_count:
+            val.extend(members)
+        else:
+            test.extend(members)
 
     if not train:
         raise DataIntegrityError("划分后训练集为空，请降低 val_ratio/test_ratio")
@@ -160,14 +210,15 @@ def compute_holdout(stems: list[str], spec: SplitSpec) -> SplitRecord:
         val=val,
         test=test,
         warnings=warnings,
+        assignment_signature=assignment_signature(train, val, test),
     )
 
 
 def compute_kfold(stems: list[str], spec: SplitSpec) -> SplitRecord:
-    items = sorted(stems)
+    groups = group_by_patient(stems)
     rng = random.Random(int(spec.seed))
-    rng.shuffle(items)
-    total = len(items)
+    rng.shuffle(groups)
+    total = len(stems)
     n_folds = int(spec.n_folds)
     if total < n_folds:
         raise DataIntegrityError(
@@ -176,18 +227,23 @@ def compute_kfold(stems: list[str], spec: SplitSpec) -> SplitRecord:
         )
 
     warnings: list[str] = []
+    if len(groups) < total:
+        warnings.append(
+            f"患者级划分：{total} 例影像聚合为 {len(groups)} 名患者，K 折按患者整组分折"
+        )
+
     if total < SMALL_DATASET_THRESHOLD:
         warnings.append(
             f"样本仅 {total} 例（<{SMALL_DATASET_THRESHOLD}），K 折结果仅用于调试，不可作为论文结论"
         )
 
-    folds: list[list[str]] = []
-    base, extra = divmod(total, n_folds)
-    cursor = 0
-    for index in range(n_folds):
-        size = base + (1 if index < extra else 0)
-        folds.append(items[cursor:cursor + size])
-        cursor += size
+    # 按患者整组分折（贪心装入当前最小的折）；同一患者的影像不会跨折
+    folds: list[list[str]] = [[] for _ in range(n_folds)]
+    counts = [0] * n_folds
+    for members in groups:
+        index = counts.index(min(counts))
+        folds[index].extend(members)
+        counts[index] += len(members)
 
     fold = int(spec.fold)
     test = list(folds[fold])
@@ -204,6 +260,7 @@ def compute_kfold(stems: list[str], spec: SplitSpec) -> SplitRecord:
         val=val,
         test=test,
         warnings=warnings,
+        assignment_signature=assignment_signature(train, val, test),
     )
 
 
@@ -278,9 +335,25 @@ def load_or_create_splits(
         if train and set(train) | set(val) | set(test) == known and (
             len(train) + len(val) + len(test) == len(known)
         ):
+            reuse_warnings = [str(w) for w in entry.get("warnings", [])]
+            # 复用持久化划分时对比请求 spec 与存储 spec：参数变化被静默忽略是坑，
+            # 必须显式告警（划分复用是有意设计，但用户应当知道 seed/ratio 已不生效）。
+            stored_spec = entry.get("spec")
+            if isinstance(stored_spec, dict):
+                requested = spec.as_dict()
+                differing = [
+                    f"{key}: 存储 {stored_spec.get(key)!r} ≠ 请求 {requested.get(key)!r}"
+                    for key in requested
+                    if stored_spec.get(key) != requested.get(key)
+                ]
+                if differing:
+                    message = "复用持久化划分（spec 参数变化被忽略）：" + "；".join(differing)
+                    reuse_warnings.append(message)
+                    logger.warning(message)
             record = SplitRecord(
                 spec=spec, signature=signature, train=train, val=val, test=test,
-                warnings=[str(w) for w in entry.get("warnings", [])], source="persisted",
+                warnings=reuse_warnings, source="persisted",
+                assignment_signature=str(entry.get("assignment_signature", "") or ""),
             )
 
     if record is None:
@@ -307,6 +380,7 @@ def to_pairs(record: SplitRecord, pairs: list[Pair]) -> SplitResult:
         val=[lookup[stem] for stem in record.val],
         test=[lookup[stem] for stem in record.test],
         warnings=list(record.warnings),
+        assignment_signature=record.assignment_signature,
     )
 
 

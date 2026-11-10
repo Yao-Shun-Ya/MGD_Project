@@ -6,23 +6,32 @@ __pycache__/
 .venv/
 venv/
 
-# Large data / weights / runs (not in git)
-data/*
-!data/README.md
-models_weights/*
-!models_weights/README.md
+# 数据与训练产物（体积大，不入库）
+data/images/
+data/gland_masks/
+data/eyelid_masks/
 outputs/
 outputs_mgd/
-MGD1k-main/
-_transfer/
+models_weights/
+mgd/logs/
+mgd/outputs/
+mgd/models_weights/
 *.pth
 *.ckpt
-*.7z
 
-# Logs and local files
-*.log
-mgd/logs/
+# 运行时产物与本地数据副本（体积大 / 含患者数据，不入库）
+logs/
+db/
+MGD1k-main/
+calibration/
+
+# 历史备份与交付中间物
+_sync_backup/
+_transfer/_deprecated/
+
+# 本机与编辑器
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+*.log

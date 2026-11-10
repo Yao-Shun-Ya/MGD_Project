@@ -140,6 +140,8 @@ mgd-pipeline --stages train --configs a.yaml,b.yaml --retries 2
 
 ## 11. 同步到运行目录 / 容器 / CI
 
+> `tools/` 是本地研究工作区，**不随仓库分发**；下面前两条同步命令仅在本机可用。
+
 ```bash
 python tools/sync_runtime.py --plan     # 新增/覆盖/保留清单
 python tools/sync_runtime.py --apply    # 备份覆盖项后写入，并逐文件哈希核对

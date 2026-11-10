@@ -50,6 +50,15 @@ class Settings:
     image_subdir: str = "images"
     gland_subdir: str = "gland_masks"
     eyelid_subdir: str = "eyelid_masks"
+    # ---- v2.4.0 诊断中心级增量（全部带默认值，向后兼容） ----
+    db_path: Path | None = None                  # 随访数据库；默认 home/"db"/"mgd_clinic.db"
+    calibration_dir: Path | None = None          # 共形校准参数；默认 output_dir/"calibration"
+    atlas_index_path: Path | None = None         # 形态图谱索引；默认 home/"db"/"atlas_index.json"
+    qc_policy: str = "default"                   # 质控策略名（阈值组）；default = 工程默认
+    physical_scale_mm_per_px: float | None = None  # 物理标定；None = 未标定（长度类指标保持 px）
+    # ---- v2.5.0 接线增量（治理/权限/脱敏） ----
+    role: str = "doctor"                         # 本机角色（RBAC）：tech/doctor/chief/admin
+    deid_salt: str | None = None                 # 报告脱敏盐；设置后 patient_id 落盘为伪名
 
     def __post_init__(self) -> None:
         home = Path(self.home).expanduser().resolve()
@@ -60,6 +69,8 @@ class Settings:
             ("output_dir", home / "outputs"),
             ("preset_file", home / "infer_presets.json"),
             ("log_file", home / "logs" / "mgd.log"),
+            ("db_path", home / "db" / "mgd_clinic.db"),
+            ("atlas_index_path", home / "db" / "atlas_index.json"),
         ):
             value = getattr(self, name)
             path = Path(value) if value is not None else default
@@ -67,10 +78,25 @@ class Settings:
                 path = home / path
             object.__setattr__(self, name, path.resolve())
 
+        # calibration_dir 默认跟随（已解析的）output_dir，故不能放进上面的固定默认表
+        calib_path = Path(self.calibration_dir) if self.calibration_dir is not None else self.output_dir / "calibration"
+        if not calib_path.is_absolute():
+            calib_path = home / calib_path
+        object.__setattr__(self, "calibration_dir", calib_path.resolve())
+
         if not (0 < float(self.clahe_clip_limit) <= 1.0):
             raise ConfigError("clahe_clip_limit 必须在 (0, 1] 区间")
         if int(self.target_height) <= 0 or int(self.target_width) <= 0:
             raise ConfigError("target_height / target_width 必须为正整数")
+        if not str(self.qc_policy).strip():
+            raise ConfigError("qc_policy 不能为空字符串")
+        if self.physical_scale_mm_per_px is not None and float(self.physical_scale_mm_per_px) <= 0:
+            raise ConfigError("physical_scale_mm_per_px 必须为正数（或 None 表示未标定）")
+        if str(self.role).strip() not in ("tech", "doctor", "chief", "admin"):
+            raise ConfigError(
+                f"未知角色 {self.role!r}",
+                hint="MGD_ROLE 可选：tech / doctor / chief / admin",
+            )
 
     @property
     def target_size(self) -> tuple[int, int]:
@@ -121,6 +147,24 @@ class Settings:
                 kwargs.setdefault("num_workers", int(env["MGD_NUM_WORKERS"]))
             except ValueError as exc:
                 raise ConfigError("MGD_NUM_WORKERS 必须为整数") from exc
+        if "MGD_DB_PATH" in env:
+            kwargs.setdefault("db_path", env["MGD_DB_PATH"] or None)
+        if "MGD_CALIBRATION_DIR" in env:
+            kwargs.setdefault("calibration_dir", env["MGD_CALIBRATION_DIR"] or None)
+        if "MGD_ATLAS_INDEX" in env:
+            kwargs.setdefault("atlas_index_path", env["MGD_ATLAS_INDEX"] or None)
+        if "MGD_ROLE" in env:
+            kwargs.setdefault("role", env["MGD_ROLE"])
+        if "MGD_DEID_SALT" in env:
+            kwargs.setdefault("deid_salt", env["MGD_DEID_SALT"] or None)
+        if "MGD_SCALE_MM_PER_PX" in env:
+            try:
+                kwargs.setdefault(
+                    "physical_scale_mm_per_px",
+                    float(env["MGD_SCALE_MM_PER_PX"]) if env["MGD_SCALE_MM_PER_PX"].strip() else None,
+                )
+            except ValueError as exc:
+                raise ConfigError("MGD_SCALE_MM_PER_PX 必须为数字") from exc
         return cls(**kwargs)
 
 

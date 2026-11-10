@@ -113,6 +113,11 @@ def run_ablation(
     reference_dice = (
         [item.metrics.dice for item in reports[reference].per_sample] if reference in reports else []
     )
+    if reference not in reports:
+        # 参考模型缺失时 Wilcoxon 列全部失效；显式标注而不是让所有行误标 "reference"
+        message = f"参考模型 {reference} 不在本次消融中（权重缺失或未评估），配对检验不可用"
+        warnings.append(message)
+        logger.warning(message)
 
     rows = []
     for name, report in reports.items():
@@ -134,7 +139,7 @@ def run_ablation(
 
         p_value, note = (
             _wilcoxon(reference_dice, values["dice"]) if name != reference and reference_dice
-            else (float("nan"), "reference")
+            else (float("nan"), "reference missing" if reference not in reports else "reference")
         )
         rows.append({
             "model": name,
@@ -177,7 +182,8 @@ def run_ablation(
         star = ""
         if np.isfinite(row["p_value"]) and row["p_value"] < 0.05:
             star = "$^{*}$"
-        latex_lines.append(" & ".join([row["model"] + star, *cells, acc]) + r" \\")
+        # 模型名同样要做下划线转义（与 note 的转义口径一致）
+        latex_lines.append(" & ".join([row["model"].replace("_", r"\_") + star, *cells, acc]) + r" \\")
         if row["note"] != "reference":
             latex_lines.append(r"\multicolumn{6}{l}{\footnotesize " + row["note"].replace("_", r"\_") + "} \\")
     latex_lines.extend([r"\hline", r"\end{tabular}", r"\end{table}", ""])

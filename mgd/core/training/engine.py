@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -21,7 +22,7 @@ from ..models.manifest import build_manifest, write_manifest
 from ..models.registry import create_model, load_pretrained, normalize_model_name, unwrap_outputs
 from ..runtime.device import describe_device, empty_cache, resolve_device
 from ..runtime.errors import MGDError, TrainingError
-from ..runtime.logging import get_logger
+from ..runtime.logging import bind_context, clear_context, get_logger
 from .checkpoint import apply_checkpoint, load_checkpoint, save_checkpoint
 from .determinism import rng_state, seed_everything
 from .ema import ModelEMA
@@ -77,19 +78,27 @@ class TrainConfig:
     run_name: str | None = None
     run_dir: str | None = None
     deterministic: bool = True
-    publish_best: bool = True
-    export_reference_report: bool = False
+    # 以下三个默认值与 specs.py（唯一参数源）保持一致；
+    # 旧实现与 schema 相反，直接构造 TrainConfig() 时会得到与文档相反的行为
+    publish_best: bool = False
+    export_reference_report: bool = True
     eval_tta: str = "关闭"
     eval_threshold: float = 0.7
     eval_tile_size: int = 384
     eval_tile_overlap: float = 0.25
+    # ---- v2.4.0 诊断中心级增量（与 specs.py 新增键一一对应，默认值一致） ----
+    qc_policy: str = "default"
+    explain_method: str = "off"
+    conformal_alpha: float = 0.10
+    physical_scale_mm_per_px: float | None = None
 
     def validate(self) -> None:
         if int(self.epochs) < 1:
             raise TrainingError("epochs 必须 ≥ 1")
         if int(self.batch_size) < 1:
             raise TrainingError("batch_size 必须 ≥ 1")
-        if float(self.lr) <= 0:
+        # NaN 绕过一切比较（nan <= 0 为 False），必须显式排除
+        if not float(self.lr) > 0:
             raise TrainingError("lr 必须 > 0")
         if not (0 <= float(self.val_ratio) < 1) or not (0 <= float(self.test_ratio) < 1):
             raise TrainingError("val_ratio / test_ratio 必须在 [0, 1) 区间")
@@ -103,6 +112,13 @@ class TrainConfig:
             raise TrainingError("cldice_warmup 必须在 [0, 0.5] 区间")
         if not (0.0 <= float(self.ema_decay) <= 1.0):
             raise TrainingError("ema_decay 必须在 [0, 1] 区间")
+        # MGD-PriorNet 在 registry 中固定 2 通道输出（眼睑门控是结构的一部分），
+        # 单任务组合必然在损失计算处崩溃；在入口就给出明确错误而不是训练中途报错
+        if normalize_model_name(self.model_name) == "MGD-PriorNet" and not bool(self.dual_task):
+            raise TrainingError(
+                "MGD-PriorNet 固定双通道输出（APG-DD 眼睑门控为结构组件）",
+                hint="请设置 model.dual_task=true，或改用支持单通道的模型",
+            )
 
 
 @dataclass
@@ -316,49 +332,55 @@ def train_iter(config: TrainConfig, settings: Settings | None = None) -> Iterato
         except Exception:
             pass
 
-    yield {
-        "event": "start",
-        "arch": arch,
-        "device": describe_device(device),
-        "train_samples": len(split.train),
-        "val_samples": len(split.val),
-        "warnings": warnings,
-    }
-
     wandb_run = None
-    if config.use_wandb:
-        try:
-            import wandb
-
-            wandb_run = wandb.init(
-                project=config.wandb_project,
-                name=config.wandb_run_name,
-                config=asdict(config),
-                reinit=True,
-            )
-        except Exception as exc:  # W&B 不可用不应中断训练
-            warnings.append(f"W&B 初始化失败，已继续本地训练：{exc}")
-            logger.warning("W&B 初始化失败：%s", exc)
-            wandb_run = None
-
-    epochs_run = 0
-    best_weights: Path | None = None
-    last_checkpoint: Path | None = None
-    eval_scope = "holdout" if split.val else "train_self"
-    scope_label = "独立验证集" if eval_scope == "holdout" else "训练集自评（不代表泛化性能）"
-
+    # start 事件处绑定 run 上下文；start yield 一并纳入 try，消费方中途弃用生成器也能清理
+    bind_context(run_id=run_dir.name if run_dir else "norun", stage="train", arch=arch)
     try:
+        yield {
+            "event": "start",
+            "arch": arch,
+            "device": describe_device(device),
+            "train_samples": len(split.train),
+            "val_samples": len(split.val),
+            "warnings": warnings,
+        }
+
+        if config.use_wandb:
+            try:
+                import wandb
+
+                wandb_run = wandb.init(
+                    project=config.wandb_project,
+                    name=config.wandb_run_name,
+                    config=asdict(config),
+                    reinit=True,
+                )
+            except Exception as exc:  # W&B 不可用不应中断训练
+                warnings.append(f"W&B 初始化失败，已继续本地训练：{exc}")
+                logger.warning("W&B 初始化失败：%s", exc)
+                wandb_run = None
+
+        epochs_run = 0
+        best_weights: Path | None = None
+        last_checkpoint: Path | None = None
+        eval_scope = "holdout" if split.val else "train_self"
+        scope_label = "独立验证集" if eval_scope == "holdout" else "训练集自评（不代表泛化性能）"
+
         for epoch in range(start_epoch, int(config.epochs) + 1):
             model.train()
             if hasattr(criterion, "cldice_weight"):
-                warmup = max(1, int(round(float(config.epochs) * float(config.cldice_warmup))))
-                progress = min(1.0, (epoch - 1) / warmup)
+                # warmup=0 表示无预热（第 1 轮即满权重）；>0 时第 1 轮从 0 线性升至满权重
+                warmup = int(round(float(config.epochs) * float(config.cldice_warmup)))
+                progress = 1.0 if warmup <= 0 else min(1.0, (epoch - 1) / warmup)
                 criterion.cldice_weight = float(config.cldice_weight) * progress
             loss_total = 0.0
             dice_values: list[float] = []
             batches = 0
             epoch_started = time.perf_counter()
             accum = max(1, int(config.grad_accum_steps))
+            # 尾组可能不满 accum 步：按实际组大小缩放损失，保证末组梯度幅度与其他组一致
+            n_full_groups = len(train_loader) // accum
+            tail_size = len(train_loader) % accum
             optimizer.zero_grad(set_to_none=True)
 
             for step, batch in enumerate(train_loader):
@@ -368,6 +390,7 @@ def train_iter(config: TrainConfig, settings: Settings | None = None) -> Iterato
                 labels = batch["label"].float().to(device)
                 eyelids = batch["eyelid"].float().to(device) if dual_task else None
 
+                group_scale = accum if (step // accum) < n_full_groups or tail_size == 0 else tail_size
                 with torch.autocast(device_type="cuda", enabled=use_amp):
                     outputs = model(images)
                     logits, aux = unwrap_outputs(outputs)
@@ -375,7 +398,7 @@ def train_iter(config: TrainConfig, settings: Settings | None = None) -> Iterato
                     aux_loss = deep_supervision_loss(aux, labels) if aux else None
                     if aux_loss is not None:
                         loss = loss + aux_loss
-                    loss = loss / accum
+                    loss = loss / group_scale
 
                 if use_amp:
                     scaler.scale(loss).backward()
@@ -394,7 +417,7 @@ def train_iter(config: TrainConfig, settings: Settings | None = None) -> Iterato
                 if batch_level:
                     scheduler.step()
 
-                loss_total += float(loss.detach().cpu()) * accum
+                loss_total += float(loss.detach().cpu()) * group_scale
                 dice_value = _dice(logits[:, 0:1].detach(), labels)
                 if not math.isnan(dice_value):
                     dice_values.append(dice_value)
@@ -430,7 +453,7 @@ def train_iter(config: TrainConfig, settings: Settings | None = None) -> Iterato
                                 # 在 384×768 分块上训练的模型出现严重尺度失配。
                                 logits = sliding_window_inference(
                                     images, (tile_h, tile_w), sw_batch_size=1,
-                                    predictor=_val_predict, overlap=0.25,
+                                    predictor=_val_predict, overlap=float(config.eval_tile_overlap),
                                 )
                             else:
                                 logits = _val_predict(images)
@@ -462,7 +485,14 @@ def train_iter(config: TrainConfig, settings: Settings | None = None) -> Iterato
                 best_path.parent.mkdir(parents=True, exist_ok=True)
                 with ema.activated(model):
                     state_dict = {key: value.detach().cpu() for key, value in model.state_dict().items()}
-                torch.save(state_dict, best_path)
+                # 原子写：写盘中断（磁盘满/断电）不能留下半截 best 权重
+                best_tmp = best_path.with_name(best_path.name + ".tmp")
+                try:
+                    torch.save(state_dict, best_tmp)
+                    os.replace(best_tmp, best_path)
+                except Exception:
+                    best_tmp.unlink(missing_ok=True)
+                    raise
                 manifest = build_manifest(
                     best_path,
                     arch=arch,
@@ -555,6 +585,7 @@ def train_iter(config: TrainConfig, settings: Settings | None = None) -> Iterato
                 except Exception as exc:  # 网络/服务端异常不应中断训练
                     warnings.append(f"W&B 记录失败（第 {epoch} 轮）：{exc}")
 
+            bind_context(stage=f"train.e{epoch}")
             yield {
                 "event": "epoch",
                 **record,
@@ -576,6 +607,7 @@ def train_iter(config: TrainConfig, settings: Settings | None = None) -> Iterato
             raise TrainingError("训练显存不足", hint="降低 batch_size 或调小分块尺寸") from exc
         raise TrainingError(f"训练失败：{exc}") from exc
     finally:
+        clear_context(["run_id", "stage", "arch"])
         if wandb_run is not None:
             try:
                 wandb_run.finish()

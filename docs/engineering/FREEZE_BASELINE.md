@@ -147,24 +147,28 @@ rng state、EMA shadow、数据签名；`--resume <run目录|checkpoints|.ckpt>`
 
 ## 8. 版本与依赖矩阵
 
-| 项 | 版本 / 约束 |
+| 项 | 版本 / 约束（下限 = 实测已安装版本） |
 |---|---|
-| Python | ≥ 3.10（实测 3.10.6 / 3.11） |
-| torch | 2.5.1（CUDA 12.1 或 CPU wheel） |
+| Python | ≥ 3.10（实测 3.10.6） |
+| torch | 2.5.1+cu121（实测；CPU wheel 同为 2.5.1） |
+| torchvision（可选） | 0.20.1+cu121（实测） |
 | numpy | 1.26.4 |
-| opencv-python | 4.8.x–4.x |
+| opencv-python | 4.8.0.74（实测） |
 | scikit-image | 0.25.2 |
 | monai | 1.5.2 |
 | scipy | 1.15.3 |
 | pandas | 2.3.3 |
 | matplotlib | 3.10.8 |
-| Pillow | 10.4–12.x |
-| PyYAML | 6.x |
+| Pillow | 12.2.0（实测） |
+| PyYAML | 6.0.3（实测） |
+| pytest（dev） | 9.2.0（实测） |
 | gradio（可选） | 6.16.0 |
-| weasyprint（可选） | 62.x（PDF 报告） |
+| pydicom / highdicom（可选） | 3.0.2 / 0.28.2（实测，DICOM 往返已验证） |
+| wandb（可选） | 0.27.0（实测） |
+| weasyprint（可选） | 未安装、未实测（PDF 报告路径） |
 
 平台：
-- Windows：CUDA 或 CPU；`num_workers=0` 建议；交付形态为 Gradio WebUI + CLI；
+- Windows：CUDA 或 CPU；transforms 已可 pickle，`num_workers=0–8` 均可用（默认仍 0）；交付形态为 Gradio WebUI + CLI；
 - Linux：CUDA 或 CPU；`num_workers=4–8`；交付形态为训练/评估 CLI（不安装 gradio）；
 - macOS/MPS：v2.3.0 起不再作为交付目标，相关脚本与分支已删除。
 
@@ -183,7 +187,7 @@ rng state、EMA shadow、数据签名；`--resume <run目录|checkpoints|.ckpt>`
 | 诊断 e2e | `ModelService.predict(UNet)` 单例 | 1.85 s、峰值 0.21 GB、分块 384×768；`verified=false` 原因与 ROI 回退提示均显式返回 |
 | 评估 | `mgd-eval --scope test --bootstrap 1000` | 产物 3 件（report/per_sample CSV/LaTeX）；见下方指标 |
 | 训练冒烟 | `mgd-train --profile quick --epochs 1` | 见下方档位实测；只报吞吐/显存，不报精度结论 |
-| 同步 | `tools/sync_runtime.py --apply` | 新增/覆盖清单后执行，逐文件 sha256 → `ALL_SYNCED` |
+| 同步 | `tools/sync_runtime.py --apply`（本地脚本，不随仓库分发） | 新增/覆盖清单后执行，逐文件 sha256 → `ALL_SYNCED` |
 
 评估实测（旧 UNet 权重，`verified=false`，仅供工程回归，不作论文指标）：
 
@@ -211,3 +215,62 @@ rng state、EMA shadow、数据签名；`--resume <run目录|checkpoints|.ckpt>`
 
 见 `docs/engineering/KNOWN_LIMITATIONS.md`。要点：`verified=false` 权重状态、
 旧权重数据泄漏、分块敏感性、预训练编码器离线降级、Windows/Linux 脚本验证程度；macOS 支持已移除。
+
+---
+
+## 11. v2.4.0 增量：诊断中心级能力（2026-11-10 冻结）
+
+本节是 v2.3.0 之上的**纯代码增量**（不跑数据、不产精度结论）。新增 11 个子包 +
+`provenance.py`，全部落在 `mgd/core/`；UI 与 CLI 只做薄壳。版本单一来源仍是
+`mgd/__init__.py` 的 `__version__`（现为 2.5.0）。
+
+### 11.1 新增子包与公开接口
+
+| 子包 | 公开接口（稳定契约） | 说明 |
+|---|---|---|
+| `quantification/` | `METRIC_REGISTRY`、`MetricSpec`、`register/get_spec/all_specs/describe`；`gland_area_ratio / width_profile / diameter_deformation_index / tortuosity_* / fractal_dimension / signal_index / local_contrast / gland_eyelid_distance`；`endpoints_and_branches / break_count / split_instances(method="cc"\|"watershed")`；`zone_edges / zonal_density / symmetry_index`；`resolve_pixel_scale / to_mm` | 可追溯指标层（ADR-003）：16 个指标全部带定义/单位/来源；`split_instances` 的 watershed 分割解决 1px 黏连实例的二义性 |
+| `grading/` | `GradeSpec`、`ARITA_MEIBOSCORE`、`PULT_MEIBOSCALE`、`grade_from_loss_percent / grade_all / grade_table / incompatibility_note`；`GradeResult / build_grade_report / grade_rows` | 双分级体系（ADR-004）；Arita ≤5% 归 0 为本项目操作化 |
+| `explain/` | `LayerCAM / ScoreCAM`（全分辨率、hook 自清理、绝不返回全零/NaN 图）、`OcclusionConfig / occlusion_map`、`instance_attribution`、`deletion_auc / insertion_auc / road_score / faithfulness_report` | 真归因 + 忠实度证据（ADR-002）；`road_score` 为 engine-defined 简化代理 |
+| `qc/` | `QualityThresholds / QualityReport / assess_quality / default_thresholds`；`QCPolicy / decide` | 8 类采集缺陷启发式（模糊/欠曝/过曝/反光/翻转不全/过翻/离焦/睫毛）；阈值全部标注「工程默认，待临床标定」 |
+| `conformal/` | `ConformalCalibrator(fit/quantile/interval/to_dict/from_dict)`、`conformal_upper_quantile`、`select_threshold_for_fnr / select_shrink_for_fp`、`save_calibration / load_calibration` | split conformal（有限样本修正 `ceil((n+1)(1-α))`）+ FNR/FP 风险控制阈值；n<1/α 拒绝出区间 |
+| `atlas/` | `TYPE_RULES`（8 类）、`TypeEvidence`、`classify_instance / classify_case`、`FEATURE_NAMES / case_vector`、`AtlasIndex(add/search/to_json/load)` | 形态学分型规则全部返回证据值；相似病例余弦检索 |
+| `longitudinal/` | `ClinicStore`（sqlite3，patient/visit/measurement/review + schema_version 幂等迁移）、`register_pair`（cv2 ECC）、`match_instances`（匈牙利算法） | 随访三件套；warp 约定为 follow→base |
+| `interop/` | `export_seg / export_sr`（pydicom+highdicom 可选，缺→`InteropDependencyError` 含安装命令）、`to_fhir_observation / to_fhir_diagnostic_report` | DICOM SEG/SR（TID 1500 风格，实例表截断 20 条）+ FHIR R4 JSON（编码为工程占位，待临床信息学审核） |
+| `governance/` | `AuditLog(append/verify/tail)`（哈希链）、`DEID_TAGS / scrub_image_exif / scrub_dicom_tags / pseudonymize`、`PERMISSIONS / can / require`（RBAC）、`ReviewLog(record/needs_arbitration/arbitrate/history)` | 审计/脱敏/权限/双人复核 |
+| `feedback/` | `CorrectionRecord / record_correction / summarize / export_candidates` | 医生修正捕获与训练候选导出（只记录不训练） |
+| `provenance.py` | `Provenance / collect_provenance` | 单次推理/报告的血缘（版本/权重 sha256/参数/校准 ID） |
+
+### 11.2 配置与报告扩展（向后兼容）
+
+- `Settings` 新增：`db_path / calibration_dir / atlas_index_path / qc_policy / physical_scale_mm_per_px`
+  （全部带默认值；`calibration_dir` 默认跟随 `output_dir`；env：`MGD_DB_PATH / MGD_CALIBRATION_DIR / MGD_ATLAS_INDEX / MGD_SCALE_MM_PER_PX`）。
+- `specs.py` 新增段 `infer`：`infer.qc_policy / infer.explain_method`；另加 `data.physical_scale_mm_per_px`、
+  `eval.conformal_alpha`；`TrainConfig` 同步 4 个新字段（旧键名与默认值零改动）。
+- `build_report()` 新增可选参数 `quality / grading / typology / provenance / explain`：
+  HTML 区块顺序 Provenance → 质控 → 分级 → 定量 → 分型 → 解释性 → 图像；None 参数完全不渲染；
+  CSV 追加行 r_loss/ga/di/ti/si/grade_arita/grade_pult/qc_score/qc_flags。
+- 新 CLI：`mgd-qc / mgd-atlas / mgd-followup / mgd-report`（均支持 `--json` 与 `--help`）。
+- 可选依赖组：`pip install "mgd-seg[dicom]"`（pydicom + highdicom）。
+
+### 11.3 质量守卫（独立目录 `quality/`）
+
+堆料式门禁体系：18 道门禁、432 项检查（语法/TODO 扫描/注册表完整性/NaN 纪律/分层/
+API 表面冻结/测试速度/导入图/specs 对齐/文档同步/禁径/可选依赖纪律/CLI 表面/
+Settings 契约/报告区块/分级交叉验证/INSTANCE_COLUMNS 冻结/严格 JSON）。
+运行：`./venv/Scripts/python.exe quality/run_gates.py`。任一 FAIL 退出码 1。
+
+
+---
+
+## 12. v2.5.0 接线增量（2026-11-10 冻结）：从能力到生效路径
+
+| 接线 | 生效点 | 事实 |
+|---|---|---|
+| conformal | `mgd-eval`（自动产出+持久化+reference_report.conformal）、`ModelService._predict`（诊断单例 Dice 覆盖下界） | 双口径（dice_coverage / rloss_interval）；`calibration_dir` 生命周期由 store 管 |
+| governance/审计 | service.predict、runner、verify（strict）、versioning.backup、eval_cli、RBAC 拒绝 | `home/logs/audit.jsonl` 哈希链；事件表见 KNOWN_LIMITATIONS §11 |
+| governance/RBAC | `mgd-eval`/`mgd-report`/`mgd-atlas` 经 `require_or_audit`（Settings.role，env MGD_ROLE） | 拒绝 = 先审计（strict）后 ConfigError |
+| governance/脱敏 | `build_report`（MGD_DEID_SALT → 病例号伪名，原始 ID 不落盘）；corrections 落盘同步伪名化 | `pseudonymize` sha256(salt+id)[:16] |
+| 日志 v2 | 三路输出（控制台/mgd_events.jsonl/errors.jsonl）+ 20MB×10 轮转 + contextvars 关联 ID | `mgd-logs tail/search --case/--run/summary` |
+| feedback | 诊断页 ImageEditor 修正 + `mgd-feedback` CLI + `db/corrections.jsonl`（掩膜 sha256，不嵌像素） | export 产出训练候选清单 |
+| DICOM | 真实 SEG/SR 写读往返（pydicom 3.0.2 + highdicom 0.28.2，21 断言） | Comprehensive SR = 1.2.840.10008.5.1.4.1.1.88.33 |
+| 新 CLI | `mgd-logs`、`mgd-feedback`（console scripts 已注册） | 合计 11 个 mgd-* 入口 |

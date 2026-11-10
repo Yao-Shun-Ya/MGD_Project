@@ -138,7 +138,12 @@ def read_manifest(weights_path: str | Path) -> ModelManifest | None:
         payload = json.loads(sidecar.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ManifestError(f"manifest 无法解析：{sidecar}", hint=str(exc)) from exc
-    return ModelManifest.from_dict(payload)
+    try:
+        return ModelManifest.from_dict(payload)
+    except (TypeError, KeyError, ValueError) as exc:
+        # 手编/截断的 manifest（缺必填字段等）必须转成 ManifestError，
+        # 让 validate_weight 的「无法证明即 pending」契约兜住，而不是穿透到 UI
+        raise ManifestError(f"manifest 字段不完整或类型错误：{sidecar}", hint=str(exc)) from exc
 
 
 def validate_weight(

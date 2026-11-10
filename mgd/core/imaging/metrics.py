@@ -41,7 +41,7 @@ def _as_tensor(mask: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(arr)
 
 
-def _surface_metric(name: str, pred: torch.Tensor, gt: torch.Tensor) -> float:
+def _surface_metric(name: str, pred: torch.Tensor, gt: torch.Tensor, spacing=None) -> float:
     if name == "hd95":
         from monai.metrics import HausdorffDistanceMetric
 
@@ -50,7 +50,8 @@ def _surface_metric(name: str, pred: torch.Tensor, gt: torch.Tensor) -> float:
         from monai.metrics import SurfaceDistanceMetric
 
         metric = SurfaceDistanceMetric(include_background=True, symmetric=True, reduction="mean")
-    metric(pred, gt)
+    # spacing 经 __call__ 的 kwargs 透传给底层 compute_*（MONAI 1.5 不接受构造参数）
+    metric(pred, gt, spacing=spacing)
     try:
         value = float(metric.aggregate().item())
     finally:
@@ -88,8 +89,10 @@ def mask_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray, spacing: tuple[floa
 
     try:
         pred_t, gt_t = _as_tensor(pred), _as_tensor(gt)
-        result.hd95 = _surface_metric("hd95", pred_t, gt_t)
-        result.assd = _surface_metric("assd", pred_t, gt_t)
+        # spacing 接线：有物理标定时 MONAI 表面距离按 mm 输出；默认 (1,1) = 像素
+        spacing_arg = [float(spacing[0]), float(spacing[1])] if spacing else None
+        result.hd95 = _surface_metric("hd95", pred_t, gt_t, spacing=spacing_arg)
+        result.assd = _surface_metric("assd", pred_t, gt_t, spacing=spacing_arg)
     except (RuntimeError, ValueError, ZeroDivisionError, IndexError) as exc:
         result.errors.append(f"表面距离计算失败：{type(exc).__name__}: {exc}")
 

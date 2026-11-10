@@ -1,9 +1,15 @@
 """MGD-Former：SegFormer-B2(MiT-B2) 编码器 + 高分辨率融合解码器。
 
-决议见 docs/engineering/ARCHITECTURE_DECISION.md：
+架构决议见 docs/engineering/ARCHITECTURE_DECISION.md。**实现现状（如实记录）**：
 - 编码器 4 阶段 stride 4/8/16/32，通道 64/128/320/512；
-- 解码器融合 1/4 与 1/8 特征，输出 stride=4，最后一次 4× 上采样回到原图；
-- 深监督：1/4、1/8、1/16 三个尺度各接 1×1 辅助头（仅腺体通道）；
+- 解码器：四级特征经 1×1 proj 统一到 decoder_dim 后，在 **stride 32 分辨率**做
+  自顶向下融合（c3/c2/c1 依次下采样到 c4 尺度相加），再经 head + 32× 双线性
+  上采样回到原图。注意：这与 ADR 中「在 1/4 与 1/8 分辨率融合、stride=4 输出」
+  的描述**不一致**——实际为 stride-32 融合 + 单次上采样；已发表指标
+  （2026-11 患者级基准）均在该实现上测得。真正的 FPN 式 stride-4 融合属于
+  v2.4.0 架构演进项，变更后必须重训并在 5 折上重新对比；
+- 深监督：3 个 1×1 辅助头（当前实现共享 stride-32 融合特征，插值到 1/4、1/8、
+  1/16——多尺度多样性有限，见 KNOWN_LIMITATIONS）；
 - 双任务头：腺体 + 眼睑（与旧模型 out_channels=2 契约一致）。
 
 只依赖纯 PyTorch，不引入自定义 CUDA 算子，保证 Windows / 离线可安装。

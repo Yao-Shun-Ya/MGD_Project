@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,7 +57,14 @@ def _load_state(path: Path) -> dict:
 
 def _save_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    # 原子写：断电/中断不能丢断点续跑状态
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def run_pipeline(
@@ -71,14 +79,17 @@ def run_pipeline(
 ) -> dict[str, Any]:
     """顺序执行配置 × 阶段。返回聚合结果（含每个 run 的 split_signature）。"""
     settings = settings or get_settings()
+    # 阶段合法性在入口一次性校验：避免跑到最后一个阶段才发现拼写错误
+    for stage in stages:
+        normalized = stage.strip().lower()
+        if normalized not in STAGES:
+            raise ValueError(f"未知阶段 {stage!r}，可选：{', '.join(STAGES)}")
     state_file = Path(state_path) if state_path else settings.output_dir / "pipeline_state.json"
     state = _load_state(state_file) if resume else {"entries": {}, "runs": []}
     results: list[dict[str, Any]] = []
 
     for stage in stages:
         normalized = stage.strip().lower()
-        if normalized not in STAGES:
-            raise ValueError(f"未知阶段 {stage!r}，可选：{', '.join(STAGES)}")
         if normalized == "pretrain":
             entry = {"stage": stage, "label": "self-supervised", "status": "skipped",
                      "reason": "自监督预训练需要大规模无标注语料与额外算力，本环境离线不可用"}
@@ -89,8 +100,9 @@ def run_pipeline(
 
         for label, config, meta in configs:
             key = f"{normalized}::{label}"
-            if resume and state.get("entries", {}).get(key, {}).get("status") == "finished":
-                results.append({**state["entries"][key], "skipped_resume": True})
+            stored = state.get("entries", {}).get(key)
+            if resume and isinstance(stored, dict) and stored.get("status") == "finished":
+                results.append({**stored, "skipped_resume": True})
                 continue
 
             attempt = 0

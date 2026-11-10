@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from ..config import Settings, get_settings
@@ -46,6 +48,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
 _ALLOWED_KEYS = {
     "tile_infer", "tile_size", "tile_overlap", "threshold", "min_area",
     "smooth_on", "smooth_sigma", "roi_only", "tta", "auto_escalate_threshold",
+    "gradcam",
 }
 
 
@@ -80,7 +83,11 @@ def save_preset(name: str, values: dict, settings: Settings | None = None) -> Pa
 
     path = settings.preset_file
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(presets, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    # 唯一临时名：固定 tmp 名在并发保存时会互相覆盖，损坏后所有预设操作持续报错
+    tmp = Path(tempfile.gettempdir()) / f"infer_presets_{os.getpid()}_{os.urandom(4).hex()}.tmp"
+    try:
+        tmp.write_text(json.dumps(presets, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
     return path

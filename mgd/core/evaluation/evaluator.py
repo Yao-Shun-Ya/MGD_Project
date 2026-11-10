@@ -22,6 +22,7 @@ from ..inference.service import InferenceOptions, ModelService
 from ..models.loader import resolve_weight_path
 from ..runtime.device import describe_device
 from ..runtime.errors import MGDError
+from ..runtime.logging import bind_context, clear_context
 
 SCOPE_LABELS = {
     "test": "独立测试集",
@@ -104,70 +105,77 @@ def evaluate_pairs(
     progress=None,
     allow_unverified: bool = True,
 ) -> EvalReport:
-    settings = settings or get_settings()
-    if not pairs:
-        raise MGDError("评估集为空", hint="请先完成 train/val/test 划分")
+    bind_context(stage="eval", scope=str(scope), arch=str(arch))
+    try:
+        settings = settings or get_settings()
+        if not pairs:
+            raise MGDError("评估集为空", hint="请先完成 train/val/test 划分")
 
-    options = options or InferenceOptions(tile_infer=True, tile_size=384, tile_overlap=0.25)
-    service = service or ModelService(settings, allow_unverified=allow_unverified)
-    resolved = resolve_weight_path(arch, weights_path, settings)
-    target_size = settings.target_size
+        options = options or InferenceOptions(tile_infer=True, tile_size=384, tile_overlap=0.25)
+        service = service or ModelService(settings, allow_unverified=allow_unverified)
+        resolved = resolve_weight_path(arch, weights_path, settings)
+        target_size = settings.target_size
 
-    per_sample: list[EvalSampleResult] = []
-    errors: list[str] = []
-    warnings: list[str] = []
-    for position, pair in enumerate(pairs, start=1):
-        try:
-            gland_prob, eyelid_prob, _, _ = service.probability_dual(pair.image, arch, options, resolved)
-            threshold = float(getattr(options, "threshold", 0.5))
-            pred = (gland_prob >= threshold).astype(np.uint8)
+        per_sample: list[EvalSampleResult] = []
+        errors: list[str] = []
+        warnings: list[str] = []
+        for position, pair in enumerate(pairs, start=1):
+            try:
+                gland_prob, eyelid_prob, _, _ = service.probability_dual(pair.image, arch, options, resolved)
+                threshold = float(getattr(options, "threshold", 0.5))
+                pred = (gland_prob >= threshold).astype(np.uint8)
 
-            gt_gland = (resize_gray(load_gray(pair.gland_mask), target_size, cv2.INTER_NEAREST) > 0).astype(np.uint8)
-            gt_eyelid = (resize_gray(load_gray(pair.eyelid_mask), target_size, cv2.INTER_NEAREST) > 0).astype(np.uint8)
+                gt_gland = (resize_gray(load_gray(pair.gland_mask), target_size, cv2.INTER_NEAREST) > 0).astype(np.uint8)
+                gt_eyelid = (resize_gray(load_gray(pair.eyelid_mask), target_size, cv2.INTER_NEAREST) > 0).astype(np.uint8)
 
-            result = mask_metrics(pred, gt_gland)
-            item = EvalSampleResult(stem=pair.stem, metrics=result)
-            item.errors.extend(result.errors)
+                result = mask_metrics(pred, gt_gland)
+                item = EvalSampleResult(stem=pair.stem, metrics=result)
+                item.errors.extend(result.errors)
 
-            if eyelid_prob is not None:
-                pred_eyelid = (eyelid_prob >= 0.5).astype(np.uint8)
-                item.eyelid_dice = mask_metrics(pred_eyelid, gt_eyelid).dice
-            item.cldice = cldice_score(pred, gt_gland)
+                if eyelid_prob is not None:
+                    pred_eyelid = (eyelid_prob >= 0.5).astype(np.uint8)
+                    item.eyelid_dice = mask_metrics(pred_eyelid, gt_eyelid).dice
+                item.cldice = cldice_score(pred, gt_gland)
 
-            pred_rloss = r_loss(pred, gt_eyelid)
-            gt_rloss = r_loss(gt_gland, gt_eyelid)
-            item.r_loss_pred = pred_rloss.r_loss_percent
-            item.r_loss_gt = gt_rloss.r_loss_percent
-            item.meiboscore_pred = meiboscore_from_rloss(item.r_loss_pred)
-            item.meiboscore_gt = meiboscore_from_rloss(item.r_loss_gt)
-            item.meiboscore_correct = bool(
-                item.meiboscore_pred >= 0 and item.meiboscore_pred == item.meiboscore_gt
-            )
-            warnings.extend(f"[{pair.stem}] {msg}" for msg in (pred_rloss.warnings + gt_rloss.warnings))
+                pred_rloss = r_loss(pred, gt_eyelid)
+                gt_rloss = r_loss(gt_gland, gt_eyelid)
+                item.r_loss_pred = pred_rloss.r_loss_percent
+                item.r_loss_gt = gt_rloss.r_loss_percent
+                item.meiboscore_pred = meiboscore_from_rloss(item.r_loss_pred)
+                item.meiboscore_gt = meiboscore_from_rloss(item.r_loss_gt)
+                item.meiboscore_correct = bool(
+                    item.meiboscore_pred >= 0 and item.meiboscore_pred == item.meiboscore_gt
+                )
+                warnings.extend(f"[{pair.stem}] {msg}" for msg in (pred_rloss.warnings + gt_rloss.warnings))
 
-            per_sample.append(item)
-        except MGDError as exc:
-            errors.append(f"[{pair.stem}] {exc.user_message()}")
-        if progress is not None:
-            progress(position, len(pairs), pair.stem)
+                per_sample.append(item)
+            except MGDError as exc:
+                errors.append(f"[{pair.stem}] {exc.user_message()}")
+            except (OSError, ValueError, RuntimeError, cv2.error) as exc:
+                # 单张坏图/损坏掩膜不应中止整场评估；如实记录后继续（模块自述契约）
+                errors.append(f"[{pair.stem}] {type(exc).__name__}: {exc}")
+            if progress is not None:
+                progress(position, len(pairs), pair.stem)
 
-    if not per_sample:
-        raise MGDError("所有样本评估失败", hint="\n".join(errors[:5]))
+        if not per_sample:
+            raise MGDError("所有样本评估失败", hint="\n".join(errors[:5]))
 
-    summary = aggregate_extended(per_sample)
-    return EvalReport(
-        arch=arch,
-        weights=str(resolved),
-        scope=str(scope),
-        scope_label=scope_label(scope),
-        samples=len(per_sample),
-        summary=summary,
-        per_sample=per_sample,
-        device=describe_device(service.device),
-        created_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        errors=errors,
-        warnings=warnings,
-    )
+        summary = aggregate_extended(per_sample)
+        return EvalReport(
+            arch=arch,
+            weights=str(resolved),
+            scope=str(scope),
+            scope_label=scope_label(scope),
+            samples=len(per_sample),
+            summary=summary,
+            per_sample=per_sample,
+            device=describe_device(service.device),
+            created_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            errors=errors,
+            warnings=warnings,
+        )
+    finally:
+        clear_context(["stage", "scope", "arch"])
 
 
 def summary_rows(report: EvalReport) -> list[list[str]]:

@@ -1,14 +1,15 @@
 # 公共依赖（Windows WebUI / Linux CLI 共用）
 # numpy 必须 < 2：OpenCV 4.8 与 numpy 2.x 不兼容
 # gradio 仅 WebUI 端需要，见 ui.txt（Linux 只训练交付不安装）
-# 版本已按 2026-11-07 实测环境（MGD_Project/venv, Python 3.10.6, torch 2.5.1+cu121）收敛：
-#   numpy 1.26.4 / opencv 4.8.0 / Pillow 12.2.0 / scikit-image 0.25.2 / monai 1.5.2
-#   pandas 2.3.3 / matplotlib 3.10.8 / scipy 1.15.3
+# 版本下限 = 实测环境已安装版本（不承诺未验证的旧版本）：
+#   numpy 1.26.4 / opencv 4.8.0.74 / Pillow 12.2.0 / scikit-image 0.25.2 / monai 1.5.2
+#   pandas 2.3.3 / matplotlib 3.10.8 / scipy 1.15.3 / PyYAML 6.0.3
 numpy==1.26.4
 opencv-python==4.8.0.74
-Pillow>=10.4,<13
+Pillow==12.2.0
 scikit-image==0.25.2
-monai>=1.5.2,<1.6
+monai==1.5.2
 pandas==2.3.3
 matplotlib==3.10.8
 scipy==1.15.3
+PyYAML==6.0.3

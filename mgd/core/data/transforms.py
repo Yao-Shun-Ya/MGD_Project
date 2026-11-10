@@ -6,6 +6,7 @@ apply_clahe，确保训练与推理逐像素同源（也顺带修正了旧版 EX
 from __future__ import annotations
 
 import cv2
+import functools
 import numpy as np
 import torch
 from monai.transforms import Compose, Lambdad, RandFlipd, RandSpatialCropd, ToTensord
@@ -46,10 +47,12 @@ def build_train_transforms(
     tile_h = int(max(32, min(int(tile_height), settings.target_height)))
     tile_w = int(max(32, min(tile_h * 2, settings.target_width)))
 
+    # 顶层函数 + functools.partial：保证变换可 pickle，num_workers>0 在
+    # Windows spawn 下才可用（lambda 会让 worker 崩溃，见 KNOWN_LIMITATIONS）。
     transforms = [
         Lambdad(keys=list(KEYS), func=load_gray_channel),
-        Lambdad(keys=["image"], func=lambda x: shared_image_preprocess(x, settings)),
-        Lambdad(keys=["label", "eyelid"], func=lambda x: shared_label_preprocess(x, settings)),
+        Lambdad(keys=["image"], func=functools.partial(shared_image_preprocess, settings=settings)),
+        Lambdad(keys=["label", "eyelid"], func=functools.partial(shared_label_preprocess, settings=settings)),
     ]
 
     if augmentation:
@@ -80,8 +83,8 @@ def build_eval_transforms(*, settings: Settings | None = None) -> Compose:
     return Compose(
         [
             Lambdad(keys=list(KEYS), func=load_gray_channel),
-            Lambdad(keys=["image"], func=lambda x: shared_image_preprocess(x, settings)),
-            Lambdad(keys=["label", "eyelid"], func=lambda x: shared_label_preprocess(x, settings)),
+            Lambdad(keys=["image"], func=functools.partial(shared_image_preprocess, settings=settings)),
+            Lambdad(keys=["label", "eyelid"], func=functools.partial(shared_label_preprocess, settings=settings)),
             ToTensord(keys=list(KEYS), dtype=torch.float32),
         ]
     )

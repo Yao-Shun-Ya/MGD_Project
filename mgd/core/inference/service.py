@@ -1,10 +1,21 @@
 """进程内推理服务：权重缓存 + 线程锁 + inference_mode + 显式 release。
 
 修复点：旧实现每次点击都从磁盘重载 ~100MB 权重并搬上 GPU，且无并发保护。
+
+治理接线（v2.5.0）：
+- 每次成功推理写 ``inference`` 审计事件、失败写 ``inference_failed``（均经
+  ``governance.hooks.audit_event``，非阻塞；payload 只含 arch/阈值/sha 前缀/耗时等
+  治理元数据，不含 PHI 或图像；case_id 由日志上下文自动带入）；
+- 成功路径注入 conformal 诊断（``extra["conformal"]`` + metrics 行），校准读取
+  失败降级为无校准，不阻断推理；逻辑抽在模块级 :func:`attach_diagnostic_conformal`，
+  可独立单测。
 """
 from __future__ import annotations
 
+import hashlib
+import math
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +25,7 @@ import torch.nn.functional as F
 from monai.inferers import sliding_window_inference
 
 from ..config import Settings, canonical_weight_candidates, get_settings, model_best_path
+from ..governance.hooks import audit_event
 from ..imaging.clinical import calculate_clinical_metrics
 from ..imaging.postprocess import (
     apply_roi,
@@ -40,7 +52,7 @@ from ..models.manifest import validate_weight
 from ..models.registry import normalize_model_name
 from ..runtime.device import describe_device, empty_cache, resolve_device
 from ..runtime.errors import InferenceError, ManifestError
-from ..runtime.logging import get_logger
+from ..runtime.logging import bind_context, clear_context, get_logger
 
 logger = get_logger("inference")
 
@@ -62,14 +74,35 @@ def normalize_tta(value: str | None) -> str:
     text = str(value or "").strip()
     if not text or text == TTA_OFF:
         return "off"
-    if text == TTA_8X or "8倍" in text:
+    lowered = text.lower()
+    if text == TTA_8X or "8倍" in text or lowered.startswith("8x"):
         return "8x"
-    if text == TTA_2X or "2倍" in text:
+    if text == TTA_2X or "2倍" in text or lowered.startswith("2x"):
         return "2x"
-    if text == TTA_4X or "4倍" in text or text.lower().startswith("4x"):
+    if text == TTA_4X or "4倍" in text or lowered.startswith("4x"):
         return "4x"
-    logger.warning("未知 TTA 选项 %r，已回退为关闭；可选：%s", value, ", ".join((TTA_OFF, TTA_2X, TTA_8X)))
+    logger.warning(
+        "未知 TTA 选项 %r，已回退为关闭；可选：%s",
+        value, ", ".join((TTA_OFF, TTA_2X, TTA_4X, TTA_8X)),
+    )
     return "off"
+
+
+def _case_id_from_image(image: np.ndarray | str | Path | None) -> str:
+    """尽力为一次推理生成稳定 case_id（sha256 前 12 位），无法哈希时记 unknown。
+
+    ndarray → tobytes sha256；路径 → 路径字符串的 sha256（同一路径重复推理 id 一致，便于 grep）。
+    """
+    try:
+        if image is None:
+            return "unknown"
+        if isinstance(image, (str, Path)):
+            payload = str(image).encode("utf-8")
+        else:
+            payload = np.asarray(image).tobytes()
+        return hashlib.sha256(payload).hexdigest()[:12]
+    except Exception:
+        return "unknown"
 
 
 def apply_roi_with_fallback(
@@ -125,6 +158,37 @@ class InferenceResult:
     extra: dict = field(default_factory=dict)
 
 
+def attach_diagnostic_conformal(result: InferenceResult, calibration: dict | None) -> None:
+    """把 conformal 校准注入推理结果（就地修改，供单测直接驱动）。
+
+    - ``calibration`` 为 None / 空 → 完全不注入（extra 无 conformal 键、metrics 不加行）；
+    - 注入 ``result.extra["conformal"] = {dice_lower_bound, coverage, calibration_id}``，
+      其中各字段来自 ``calibration["dice_coverage"]``（bound / coverage）与
+      ``calibration["calibration_id"]``；结构缺失一律置 None，不猜测；
+    - bound 为有限数时 metrics 追加一行
+      ``["Dice 覆盖下界(1-α)", "≥0.xx (校准 id xxxx)"]``；
+      口径被 skipped（bound=None）时只写 extra 不加行——绝不让 ``≥nan`` 落进指标表。
+    """
+    if not calibration:
+        return
+    dice_block = calibration.get("dice_coverage") or {}
+    bound = dice_block.get("bound")
+    coverage = dice_block.get("coverage")
+    calibration_id = calibration.get("calibration_id")
+    payload = {
+        "dice_lower_bound": float(bound) if isinstance(bound, (int, float)) else None,
+        "coverage": float(coverage) if isinstance(coverage, (int, float)) else None,
+        "calibration_id": str(calibration_id) if calibration_id else None,
+    }
+    result.extra["conformal"] = payload
+    bound_value = payload["dice_lower_bound"]
+    if bound_value is not None and math.isfinite(bound_value):
+        result.metrics.append(
+            ["Dice 覆盖下界(1-α)",
+             f"≥{bound_value:.2f} (校准 id {payload['calibration_id']})"]
+        )
+
+
 @dataclass(frozen=True)
 class WeightCandidate:
     arch: str
@@ -156,6 +220,11 @@ class ModelService:
         self._cache: dict[tuple, tuple[torch.nn.Module, Path]] = {}
         self._lock = threading.RLock()
         self._infer_lock = threading.Lock()
+        # conformal 校准占位：后续版本在此缓存 load_latest_metric_calibration 结果，
+        # 当前每次 _predict 直读磁盘（校准文件极小，读代价可忽略）
+        self._calibration_cache: dict | None = None
+        # 已加载权重的 sha256 前 12 位缓存（load 时从 manifest 捕获，审计 payload 使用）
+        self._sha_prefixes: dict[str, str] = {}
         logger.info("ModelService 设备：%s", describe_device(self.device))
 
     # ---------- 生命周期 ----------
@@ -188,6 +257,8 @@ class ModelService:
                 return cached[0]
 
             status = validate_weight(path, canonical, settings=self.settings)
+            if status.manifest is not None and getattr(status.manifest, "sha256", None):
+                self._sha_prefixes[str(path)] = str(status.manifest.sha256)[:12]
             if status.status == "pending" and not self.allow_unverified:
                 raise ManifestError(
                     f"权重 {path.name} 处于 pending 状态：{status.reason}",
@@ -286,7 +357,102 @@ class ModelService:
         options: InferenceOptions | None = None,
         weights_path: str | Path | None = None,
     ) -> InferenceResult:
+        """推理入口：绑定 stage/case_id 日志上下文，结束即清理（try/finally，不污染下一请求）。"""
         options = options or InferenceOptions()
+        bind_context(stage="inference", case_id=_case_id_from_image(image))
+        try:
+            return self._predict(image, arch, options, weights_path)
+        finally:
+            clear_context(["case_id", "stage"])
+
+    def _predict(
+        self,
+        image: np.ndarray | str | Path,
+        arch: str,
+        options: InferenceOptions,
+        weights_path: str | Path | None,
+    ) -> InferenceResult:
+        """推理主体（治理接线）：
+
+        - 成功 → ``inference`` 审计（arch / applied_threshold / weights sha 前 12 位 /
+          耗时 ms / r_loss / 置信度摘要；case_id 由 predict() 绑定的日志上下文自动进入
+          payload），并注入 conformal 诊断（读取失败降级，不阻断）；
+        - 失败 → ``inference_failed`` 审计（arch / error type），非阻塞，业务异常原样上抛。
+        审计与校准均不改变推理结果本身。
+        """
+        arch_name = normalize_model_name(arch)
+        started = time.perf_counter()
+        try:
+            result = self._run_predict(image, arch_name, options, weights_path)
+        except Exception as exc:
+            audit_event(
+                self.settings,
+                "inference_failed",
+                actor="system",
+                payload={"arch": arch_name, "error_type": type(exc).__name__},
+            )
+            raise
+        attach_diagnostic_conformal(result, self._load_conformal_calibration(arch_name))
+        audit_event(
+            self.settings,
+            "inference",
+            actor="system",
+            payload=self._inference_audit_payload(arch_name, result, weights_path, started),
+        )
+        return result
+
+    def _load_conformal_calibration(self, arch_name: str) -> dict | None:
+        """读取该 arch 最新 metric 校准；任何失败降级为 None（诊断信息不阻断推理）。
+
+        conformal.pipeline 延迟到函数内导入：推理热路径不为此增加任何 import 期
+        依赖（core 顶层 import 门禁不含 conformal）。
+        """
+        try:
+            from ..conformal.pipeline import load_latest_metric_calibration
+
+            calibration = load_latest_metric_calibration(arch_name, self.settings)
+        except Exception as exc:
+            logger.warning("conformal 校准读取失败（已降级为无校准）：%s", exc)
+            return None
+        self._calibration_cache = calibration
+        return calibration
+
+    def _inference_audit_payload(
+        self,
+        arch_name: str,
+        result: InferenceResult,
+        weights_path: str | Path | None,
+        started: float,
+    ) -> dict:
+        """``inference`` 审计 payload：只放治理元数据，不含 PHI / 图像。
+
+        weights sha 前 12 位从 load() 时捕获的 manifest 缓存取（sha256 已在加载期算过，
+        这里只做路径解析 + dict 查表）；拿不到（异常 / 未缓存）→ None。
+        """
+        weights_sha: str | None = None
+        try:
+            path = resolve_weight_path(arch_name, weights_path, self.settings)
+            weights_sha = self._sha_prefixes.get(str(path))
+        except Exception:
+            weights_sha = None
+        clinical = result.extra.get("clinical")
+        confidence = result.extra.get("confidence") or {}
+        return {
+            "arch": arch_name,
+            "applied_threshold": float(result.applied_threshold),
+            "weights_sha256": weights_sha,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            "r_loss_percent": getattr(getattr(clinical, "rloss", None), "r_loss_percent", None),
+            "confidence_score": confidence.get("score"),
+        }
+
+    def _run_predict(
+        self,
+        image: np.ndarray | str | Path,
+        arch: str,
+        options: InferenceOptions,
+        weights_path: str | Path | None,
+    ) -> InferenceResult:
         gland_prob, eyelid_prob, pre, tta_stack = self.probability_dual(image, arch, options, weights_path)
         prob_map = gland_prob
 
@@ -313,17 +479,24 @@ class ModelService:
             mask, prob, roi_fallback = apply_roi_with_fallback(mask, prob, roi)
             roi_applied = True
             if roi_fallback:
-                roi = np.ones_like(mask, dtype=np.float32)
+                # 关键：回退后不能拿全图当眼睑分母——那会把 R_loss 拉到 ~90%，
+                # 让任何触发回退的病例都被误判成 Meiboscore 3（重度萎缩）。
+                # 传 None 走「缺眼睑 ROI → NaN + warning」的诚实分支。
+                roi = None
 
         gray_u8 = pre.resized
         image_rgb = np.repeat(gray_u8[:, :, None], 3, axis=2)
         overlay = binary_overlay(gray_u8, mask)
         heatmap = generate_heatmap(prob, gray_u8)
-        contour = generate_contour_visualization(prob, gray_u8, min_area=options.min_area)
+        contour = generate_contour_visualization(
+            prob, gray_u8, min_area=options.min_area, threshold=post.applied_threshold,
+        )
         skeleton = generate_skeleton_visualization(mask, gray_u8)
         instances = generate_instance_visualization(mask, gray_u8, min_area=options.min_area)
 
-        clinical = calculate_clinical_metrics(mask, roi, min_area=options.min_area)
+        clinical = calculate_clinical_metrics(
+            mask, roi, min_area=options.min_area, gray_img=gray_u8,
+        )
         uncertainty = uncertainty_map(prob_map, tta_stack)
         confidence = confidence_score(prob_map, review_ratio=options.review_ratio)
         uncertainty_image = uncertainty_overlay(uncertainty, gray_u8)
@@ -332,8 +505,15 @@ class ModelService:
         if options.gradcam:
             model = self.load(arch, weights_path)
             tensor = torch.from_numpy(pre.model_input)[None, None, :, :].float().to(self.device)
-            with self._infer_lock:
-                cam = self._gradcam(model, tensor, channel=0)
+            try:
+                with self._infer_lock:
+                    cam = self._gradcam(model, tensor, channel=0)
+            except torch.cuda.OutOfMemoryError as exc:
+                empty_cache(self.device)
+                raise InferenceError(
+                    "Grad-CAM 显存不足（全分辨率网络的反向传播需要大量激活）",
+                    hint="关闭 Grad-CAM，或更换参数量更小的模型/关闭 TTA 后重试",
+                ) from exc
             gradcam_image = gradcam_overlay(cam, gray_u8)
 
         metrics = list(clinical.summary)
@@ -344,7 +524,8 @@ class ModelService:
         metrics.append(["ROI 约束", ("全图（ROI 冲突回退）" if roi_fallback
                                     else ("双任务眼睑分支" if dual_task else "Otsu 估计"))
                         if options.roi_only else "全图"])
-        metrics.append(["TTA", options.tta])
+        # 显示归一后的实际档位：传未知字符串时实际跑 off，不能原样展示误导
+        metrics.append(["TTA", normalize_tta(options.tta)])
         metrics.append(["AI 置信度评分", f"{confidence['score']:.1f} / 100"])
         metrics.append(["模糊区占比 (0.4~0.6)", f"{confidence['ambiguous_ratio']:.2%}"])
         metrics.append(["平均像素熵", f"{confidence['mean_entropy']:.3f}"])

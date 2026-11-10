@@ -73,10 +73,21 @@ def reference_report_payload(
     *,
     split_signature: str,
     data_signature: str | None = None,
+    assignment_signature: str | None = None,
     n_bootstrap: int = 1000,
     extra: dict[str, Any] | None = None,
+    conformal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """把一次评估转成可复核的报告；同时给出 per-sample 指标供配对检验。"""
+    """把一次评估转成可复核的报告；同时给出 per-sample 指标供配对检验。
+
+    双签名：`split_signature`（文件清单，回答“数据集有没有变”）+
+    `assignment_signature`（实际派分，回答“这次到底用了哪份划分”）。
+
+    `conformal`（可选）：metric 校准 payload（见 mgd.core.conformal.pipeline）。
+    非 None → 顶层写入 `payload["conformal"]`，并在 `extra` 中补
+    `calibration_id`（extra 已存在则在其副本上更新，不存在则创建）；
+    None → payload 不含任何新键（旧调用零变化）。
+    """
     if not split_signature:
         raise ValueError("reference_report 必须携带 split_signature（反泄漏硬约束）")
     metrics: dict[str, Any] = {}
@@ -102,6 +113,7 @@ def reference_report_payload(
         "weights": str(report.weights),
         "split_signature": split_signature,
         "data_signature": data_signature,
+        "assignment_signature": assignment_signature or "",
         "bootstrap": {"iterations": int(n_bootstrap), "alpha": 0.05},
         "metrics": metrics,
         "summary": {key: value for key, value in report.summary.items()},
@@ -111,6 +123,14 @@ def reference_report_payload(
     }
     if extra:
         payload["extra"] = extra
+    if conformal is not None:
+        payload["conformal"] = conformal
+        extra_block = payload.get("extra")
+        calibration_id = conformal.get("calibration_id")
+        if isinstance(extra_block, dict):
+            payload["extra"] = {**extra_block, "calibration_id": calibration_id}
+        else:
+            payload["extra"] = {"calibration_id": calibration_id}
     return payload
 
 

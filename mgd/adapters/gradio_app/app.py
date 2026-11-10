@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from datetime import datetime
@@ -15,6 +16,7 @@ from queue import Empty, Queue
 import numpy as np
 
 from ... import __version__
+from ...core.atlas import TYPE_RULES, AtlasIndex, case_vector, classify_case
 from ...core.config import Settings, get_settings, list_trained_models
 from ...core.data.pairing import scan_dataset
 from ...core.data.splits import SplitSpec, get_splits
@@ -31,6 +33,16 @@ from ...core.evaluation import (
     export_latex,
     summary_rows,
 )
+from ...core.feedback import append_record, record_correction
+from ...core.explain import (
+    LayerCAM,
+    OcclusionConfig,
+    ScoreCAM,
+    faithfulness_report,
+    occlusion_map,
+)
+from ...core.grading import grade_all, grade_table, incompatibility_note
+from ...core.imaging.preprocess import preprocess_array, to_gray
 from ...core.inference import (
     InferenceOptions,
     ModelService,
@@ -43,6 +55,10 @@ from ...core.inference import (
 )
 from ...core.models.manifest import validate_weight
 from ...core.models.registry import MODEL_NAMES
+from ...core.longitudinal import ClinicStore, instance_centroids, register_pair
+from ...core.provenance import collect_provenance
+from ...core.qc import QCPolicy, assess_quality, decide, default_thresholds
+from ...core.quantification import break_count, width_profile
 from ...core.reporting.report import build_report
 from ...core.runtime.device import describe_device, resolve_device
 from ...core.runtime.doctor import run_doctor
@@ -382,7 +398,11 @@ def _candidate_map(settings: Settings) -> dict[str, tuple[str, Path | None]]:
 
 
 def _resolve_selection(label: str, settings: Settings) -> tuple[str, Path | None]:
-    return _candidate_map(settings).get(label, ("MGD-Former", None))
+    # 未知 label 显式报错：静默回退到未训练的 MGD-Former 会让用户误以为在用已训练权重
+    resolved = _candidate_map(settings).get(label)
+    if resolved is None:
+        raise ValueError(f"未知权重选项：{label!r}（权重目录可能已变化，请刷新页面）")
+    return resolved
 
 
 def _scope_key(label: str) -> str:
@@ -394,16 +414,21 @@ def _scope_key(label: str) -> str:
     return "test"
 
 
-_WEIGHT_STATUS_CACHE: dict[tuple, object] = {}
+_WEIGHT_STATUS_CACHE: dict[tuple[str, str], tuple[int, object]] = {}
 
 
 def _cached_weight_status(path: Path, arch: str, settings: Settings):
-    """manifest 校验含 sha256，按 (路径, mtime, 架构) 缓存。"""
-    key = (str(path), path.stat().st_mtime_ns, str(arch))
-    status = _WEIGHT_STATUS_CACHE.get(key)
-    if status is None:
-        status = validate_weight(path, arch, settings=settings)
-        _WEIGHT_STATUS_CACHE[key] = status
+    """manifest 校验含 sha256，按 (路径, 架构) 缓存并只在 mtime 变化时重算（缓存有界）。"""
+    key = (str(path), str(arch))
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError as exc:
+        raise MGDError(f"权重文件不可访问：{path}", hint=str(exc)) from exc
+    cached = _WEIGHT_STATUS_CACHE.get(key)
+    if cached is not None and cached[0] == mtime_ns:
+        return cached[1]
+    status = validate_weight(path, arch, settings=settings)
+    _WEIGHT_STATUS_CACHE[key] = (mtime_ns, status)  # 每个路径只保留最新 mtime，无界增长风险
     return status
 
 
@@ -412,6 +437,243 @@ def _fmt(value, digits: int = 4) -> str:
         return f"{float(value):.{digits}f}"
     except (TypeError, ValueError):
         return "N/A"
+
+
+def _num_text(value, digits: int = 2) -> str:
+    """数值 → 文本；None / NaN / Inf 一律 N/A（绝不拿 0 冒充测量值）。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if not np.isfinite(number):
+        return "N/A"
+    return f"{number:.{digits}f}"
+
+
+def _qc_rows(report) -> list[list[str]]:
+    """QualityReport → 展示表格：得分 / 触发项 / 理由 / 逐项原始量 / 阈值快照。"""
+    rows = [["项", "数值"]]
+    rows.append(["质控得分", f"{float(report.score):.1f} / 100"])
+    rows.append(["触发缺陷", "、".join(report.flags) if report.flags else "无"])
+    for index, reason in enumerate(report.reasons, start=1):
+        rows.append([f"理由 {index}", str(reason)])
+    for key, value in report.metrics.items():
+        rows.append([
+            f"原始量 · {key}",
+            "N/A（不可测）" if value is None else f"{float(value):.4g}",
+        ])
+    for key, value in report.thresholds.items():
+        rows.append([f"阈值 · {key}", f"{float(value):g}"])
+    return rows
+
+
+def _numeric_series(df, column: str) -> np.ndarray:
+    """DataFrame 列 → 有限数值数组；列缺失 / 全不可解析返回空数组。"""
+    if df is None or column not in getattr(df, "columns", []):
+        return np.empty(0, dtype=np.float64)
+    collected: list[float] = []
+    for value in df[column].tolist():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(number):
+            collected.append(number)
+    return np.asarray(collected, dtype=np.float64)
+
+
+def _truncation_ratio(instance_df) -> float:
+    """实例表「是否截断」列 → 截断占比；列缺失 / 全空返回 NaN。"""
+    if instance_df is None or "是否截断" not in getattr(instance_df, "columns", []):
+        return float("nan")
+    values = [str(value).strip() for value in instance_df["是否截断"].tolist()]
+    if not values:
+        return float("nan")
+    flagged = sum(1 for value in values if value in ("是", "True", "true", "1"))
+    return flagged / float(len(values))
+
+
+#: ghost 判定的低置信概率带与最小连通域面积（与 atlas.typology.DEFAULT_THRESHOLDS["ghost"] 同口径）
+_GHOST_PROB_LOW = 0.2
+_GHOST_PROB_HIGH = 0.5
+_GHOST_MIN_AREA_PX = 120
+
+
+def _ghost_area_px(prob_map, binary_mask) -> float:
+    """幻影腺体面积（px）：0.2<p<0.5 且不属于确定性腺体掩膜的连通域总面积。
+
+    低置信像素先剔除 binary_mask，再做连通域标记；面积 ≥ 120 px 的连通域求和。
+    输入缺失 / 形状不一致 → NaN（不判定）；没有任何低置信像素 → 0.0（真实测量值为 0）。
+    """
+    prob = np.asarray(prob_map)
+    binary = np.asarray(binary_mask)
+    if prob.ndim != 2 or binary.ndim != 2 or prob.shape != binary.shape:
+        return float("nan")
+    low_conf = (prob > _GHOST_PROB_LOW) & (prob < _GHOST_PROB_HIGH) & (binary == 0)
+    if not low_conf.any():
+        return 0.0
+    import cv2
+
+    num, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        low_conf.astype("uint8"), connectivity=8
+    )
+    total = 0
+    for label in range(1, int(num)):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area >= _GHOST_MIN_AREA_PX:
+            total += area
+    return float(total)
+
+
+def _width_profile_std(binary_mask) -> float:
+    """骨架宽度剖面标准差（beading 判据的分子）；宽度序列无效 → NaN。"""
+    try:
+        profile = width_profile(binary_mask)
+    except Exception:
+        return float("nan")
+    arr = np.asarray(profile, dtype=np.float64).ravel()
+    if arr.size == 0:
+        return float("nan")
+    return float(np.std(arr))
+
+
+def _min_inter_instance_distance_px(binary_mask) -> float:
+    """实例质心两两最小欧氏距离（px，confluence 判据）；实例 < 2 或掩膜为空 → NaN。
+
+    instance_df 当前无质心列（INSTANCE_COLUMNS 口径），统一从 binary_mask 用
+    ``longitudinal.match.instance_centroids`` 提取质心后计算。
+    """
+    try:
+        centroids = instance_centroids(binary_mask)
+    except Exception:
+        return float("nan")
+    if len(centroids) < 2:
+        return float("nan")
+    points = np.asarray(list(centroids.values()), dtype=np.float64)
+    diff = points[:, None, :] - points[None, :, :]
+    distances = np.sqrt((diff ** 2).sum(axis=-1))
+    np.fill_diagonal(distances, np.inf)
+    return float(distances.min())
+
+
+def _atlas_case_features(result, instance_df, ga_percent) -> dict:
+    """最近诊断结果 → 图谱特征 dict（键名对齐 atlas.FEATURE_NAMES + 分型工程量）。
+
+    缺失维度一律不进 dict（case_vector 补 NaN），绝不用 0 冒充测量值。
+    除实例表统计外，还从 prob_map / binary_mask 生产 ghost_area_px（幻影）、
+    width_profile_std（串珠）、min_inter_instance_distance_px（融合）三个
+    分型判据，避免 ghost / beading / confluence 恒为 NaN。
+    """
+    features: dict = {}
+
+    def put(key: str, value) -> None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return
+        if np.isfinite(number):
+            features[key] = number
+
+    binary_mask = getattr(result, "binary_mask", None)
+    put("ga_percent", ga_percent)
+    put("break_count", break_count(binary_mask))
+    if instance_df is not None and len(instance_df) > 0:
+        put("instance_count", float(len(instance_df)))
+        widths = _numeric_series(instance_df, "短轴(px)")
+        if widths.size:
+            mean_width = float(widths.mean())
+            put("width_mean_px", mean_width)
+            if widths.size > 1 and mean_width > 0:
+                put("width_cv", float(widths.std() / mean_width))
+        # TI = τ − 1（Pult & Nichols 弧长/弦长口径；τ 本身不是 TI，不能原值入特征）
+        tortuosity = _numeric_series(instance_df, "弯曲度τ")
+        if tortuosity.size:
+            put("tortuosity_index", float(tortuosity.mean()) - 1.0)
+        curvature = _numeric_series(instance_df, "平均曲率κ")
+        if curvature.size:
+            put("mean_curvature", float(curvature.mean()))
+        ratio = _truncation_ratio(instance_df)
+        put("truncation_ratio", ratio)
+    # 图谱特征补全（ghost / beading / confluence 三条规则的生产者）
+    put("ghost_area_px", _ghost_area_px(getattr(result, "prob_map", None), binary_mask))
+    put("width_profile_std", _width_profile_std(binary_mask))
+    put("min_inter_instance_distance_px", _min_inter_instance_distance_px(binary_mask))
+    return features
+
+
+def _visit_label(entry: dict) -> str:
+    """就诊记录 → 下拉框标签（#id 可反解）。"""
+    return f"#{entry.get('id')} · {entry.get('visit_date') or '—'} · {entry.get('eye') or '—'}"
+
+
+def _visit_id_from_label(label) -> int | None:
+    match = re.match(r"^#(\d+)", str(label or ""))
+    return int(match.group(1)) if match else None
+
+
+def _pair_ecc_note(base_visit: dict | None, follow_visit: dict | None) -> str:
+    """两次就诊影像都存在时做 ECC 配准，返回展示用说明文本。"""
+    base_path = str((base_visit or {}).get("image_path") or "")
+    follow_path = str((follow_visit or {}).get("image_path") or "")
+    if not base_path or not follow_path:
+        return "两次就诊未同时登记影像路径，跳过 ECC 配准。"
+    base_file, follow_file = Path(base_path), Path(follow_path)
+    if not base_file.is_file() or not follow_file.is_file():
+        return (
+            f"影像文件缺失（{base_file.name} / {follow_file.name}），跳过 ECC 配准。"
+        )
+    try:
+        import cv2
+
+        base_gray = cv2.imread(str(base_file), cv2.IMREAD_GRAYSCALE)
+        follow_gray = cv2.imread(str(follow_file), cv2.IMREAD_GRAYSCALE)
+        if base_gray is None or follow_gray is None:
+            return "影像读取失败，跳过 ECC 配准。"
+        if base_gray.shape != follow_gray.shape:
+            return (
+                f"影像尺寸不一致（{base_gray.shape[::-1]} vs {follow_gray.shape[::-1]}），"
+                "跳过 ECC 配准。"
+            )
+        outcome = register_pair(base_gray, follow_gray)
+    except Exception as exc:
+        return f"ECC 配准失败：{exc}"
+    score_text = _fmt(outcome.get("ecc_score"), 4)
+    if outcome.get("ok"):
+        return f"**ECC 配准成功**：score={score_text}（{outcome.get('note')}）"
+    return f"**ECC 配准未达可信阈值**：score={score_text}（{outcome.get('note')}）"
+
+
+def _editor_ink_mask(editor_value) -> np.ndarray | None:
+    """gr.ImageEditor 提交值 → 前景布尔掩膜；画布无内容 → None。
+
+    gradio 6.16 的 ImageEditor 预处理返回 ``{"background": ndarray|None,
+    "layers": [ndarray, ...], "composite": ndarray|None}``，且默认
+    ``image_mode="RGBA"``，通道顺序为 R,G,B,A：
+    - 画布存在透明区域（未铺不透明底图）时，笔迹 / 图层墨水的 alpha>0 即前景，
+      直接取 alpha 通道（此时墨水 RGB 可能是黑的，按亮度 >0 会漏判）；
+    - 底图不透明（alpha 全 255，例如医生上传了 JPG 掩膜）时退化为亮度 >0
+      （黑底白前景惯例）；
+    - composite 缺失时按「最后一个图层 → background」兜底（用户未触碰画布
+      就提交的场景）。
+    """
+    if not isinstance(editor_value, dict):
+        return None
+    layers = [item for item in (editor_value.get("layers") or []) if item is not None]
+    source = editor_value.get("composite")
+    if source is None:
+        source = layers[-1] if layers else editor_value.get("background")
+    if source is None:
+        return None
+    arr = np.asarray(source)
+    if arr.ndim == 2:
+        return arr > 0
+    if arr.ndim != 3 or arr.shape[-1] < 3:
+        return None
+    if arr.shape[-1] >= 4:
+        alpha = arr[..., 3]
+        if bool((alpha < 255).any()):
+            return alpha > 0
+    return arr[..., :3].max(axis=-1) > 0
 
 
 def create_app(settings: Settings | None = None):
@@ -454,10 +716,11 @@ def create_app(settings: Settings | None = None):
         try:
             import torch
 
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
             started = time.perf_counter()
             with WORK_LOCK:
+                # reset 必须在锁内：排在后面的请求在锁外 reset 会清掉前一次的峰值统计
+                if torch.cuda.is_available():
+                    torch.cuda.reset_peak_memory_stats()
                 result = service.predict(image, arch=arch, options=options, weights_path=path)
             elapsed = time.perf_counter() - started
             peak = 0.0
@@ -469,7 +732,7 @@ def create_app(settings: Settings | None = None):
             return (None, None, None, None, None, None, None, _empty_metrics(), f"推理失败：{exc}")
 
         last_result.clear()
-        last_result.update({"result": result, "arch": arch})
+        last_result.update({"result": result, "arch": arch, "path": path, "options": options})
         extra = result.extra
         status = [
             f"**设备**：{extra['device']}　**模型**：{extra['arch']}　"
@@ -509,8 +772,53 @@ def create_app(settings: Settings | None = None):
         if not last_result:
             return None, "请先完成一次分析。"
         payload = last_result["result"]
+        options = last_result.get("options") or InferenceOptions()
+
+        # v2.4.0 扩展区块（provenance / 分级 / 形态分型）：任何一个计算失败 →
+        # warning 并丢弃该区块，报告主功能永不因扩展失败而挂；quality / explain
+        # 属于质控与解释性页签的独立状态，这里不传（None → 区块不渲染）。
+        provenance = grading = typology = None
         try:
-            bundle = build_report(payload, model_name=last_result["arch"], patient_id="case")
+            provenance = collect_provenance(
+                model_name=last_result["arch"],
+                threshold=float(options.threshold),
+                tile_size=int(options.tile_size) if options.tile_infer else None,
+                tile_overlap=float(options.tile_overlap) if options.tile_infer else None,
+                tta=str(options.tta),
+                weights_path=last_result.get("path"),
+            )
+        except Exception as exc:
+            logger.warning("报告 Provenance 区块生成失败：%s", exc)
+        extra = getattr(payload, "extra", None) or {}
+        clinical = extra.get("clinical")
+        try:
+            loss_value = float(
+                getattr(getattr(clinical, "rloss", None), "r_loss_percent", float("nan"))
+            )
+        except (TypeError, ValueError):
+            loss_value = float("nan")
+        if clinical is not None and np.isfinite(loss_value):
+            try:
+                grading = grade_all(loss_value)
+            except Exception as exc:
+                logger.warning("报告分级区块生成失败：%s", exc)
+        instance_df = extra.get("instance_df")
+        if instance_df is not None and len(instance_df) > 0:
+            try:
+                typology = classify_case(
+                    instance_df, _atlas_case_features(payload, instance_df, loss_value)
+                )
+            except Exception as exc:
+                logger.warning("报告形态分型区块生成失败：%s", exc)
+        try:
+            bundle = build_report(
+                payload,
+                model_name=last_result["arch"],
+                patient_id="case",
+                grading=grading,
+                typology=typology,
+                provenance=provenance,
+            )
         except Exception as exc:
             return None, f"报告生成失败：{exc}"
         return str(bundle.html_path), (
@@ -589,16 +897,23 @@ def create_app(settings: Settings | None = None):
 
         def worker():
             try:
-                result, context = run_training(
-                    config, meta, settings, on_event=lambda event: queue.put(("event", event))
-                )
-                box["result"] = result
-                box["context"] = context
+                # 训练与推理/评估共用 GPU：必须持同一把 WORK_LOCK，否则三者并发争抢显存
+                with WORK_LOCK:
+                    result, context = run_training(
+                        config, meta, settings, on_event=lambda event: queue.put(("event", event))
+                    )
+                    box["result"] = result
+                    box["context"] = context
                 queue.put(("done", None))
             except Exception as exc:
                 box["error"] = exc
                 queue.put(("error", None))
             finally:
+                try:
+                    # 训练结束后释放模型缓存：旧 mtime 的模型不再复用，显存归还
+                    service.release()
+                except Exception:
+                    pass
                 queue.put(("end", None))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -696,7 +1011,10 @@ def create_app(settings: Settings | None = None):
 
     # ================= 评估 =================
     def eval_fn(selection, scope_label):
-        arch, path = _resolve_selection(selection, settings)
+        try:
+            arch, path = _resolve_selection(selection, settings)
+        except ValueError as exc:
+            return _empty_metrics(), _empty_metrics(), str(exc)
         scope = _scope_key(scope_label)
         try:
             index = scan_dataset(settings)
@@ -746,8 +1064,6 @@ def create_app(settings: Settings | None = None):
         )
 
     def compare_fn(labels):
-        import re
-
         ids = [str(label).split(" · ")[0] for label in (labels or [])]
         summaries = compare_runs(ids, settings)
         last_compare["summaries"] = summaries
@@ -873,6 +1189,304 @@ def create_app(settings: Settings | None = None):
             ])
         return rows
 
+    # ================= 质控（WP-11，纯 CPU，不碰模型） =================
+    def qc_fn(image, eyelid_mask):
+        placeholder = [["—", "—"]]
+        if image is None:
+            gr.Warning("请先上传待检灰度图")
+            return placeholder, ""
+        try:
+            gray = to_gray(np.asarray(image))
+            mask = None
+            if eyelid_mask is not None:
+                mask = to_gray(np.asarray(eyelid_mask))
+                if mask.shape != gray.shape:
+                    raise ValueError(
+                        f"眼睑掩膜尺寸 {mask.shape[::-1]} 与灰度图 {gray.shape[::-1]} 不一致，"
+                        "请上传同尺寸掩膜"
+                    )
+                mask = (mask > 0).astype(np.uint8)
+            thresholds = default_thresholds(settings.qc_policy)
+            report = assess_quality(gray, eyelid_mask=mask, thresholds=thresholds)
+            decision = decide(report, QCPolicy())
+        except Exception as exc:
+            gr.Warning(f"质控失败：{exc}")
+            return placeholder, ""
+        action = (
+            f"**建议动作**：`{str(decision['action']).upper()}` —— {decision['reason']}"
+            f"　（阈值组：qc_policy={settings.qc_policy}）"
+        )
+        return _qc_rows(report), action
+
+    # ================= 解释性（WP-11，GPU 回调，必须持 WORK_LOCK） =================
+    def explain_fn(method, window, stride, max_windows):
+        placeholder = [["指标", "数值"]]
+        if not last_result:
+            gr.Warning("请先在「诊断」页完成一次分析")
+            return None, placeholder, "尚无最近诊断。"
+        try:
+            import torch
+
+            result = last_result["result"]
+            arch = last_result["arch"]
+            weights_path = last_result.get("path")
+            options = last_result.get("options") or InferenceOptions()
+            started = time.perf_counter()
+            with WORK_LOCK:
+                gray = to_gray(result.image_rgb)
+                pre = preprocess_array(gray, settings)
+                tensor = torch.from_numpy(np.asarray(pre.model_input))[
+                    None, None, :, :
+                ].float().to(service.device)
+                prob_map = np.asarray(result.prob_map)
+                if str(method) == "遮挡敏感度":
+
+                    def predict_fn(img):
+                        probability, _ = service.probability(
+                            img, arch=arch, options=options, weights_path=weights_path
+                        )
+                        return probability
+
+                    config = OcclusionConfig(
+                        window=max(1, int(window)),
+                        stride=max(1, int(stride)),
+                        max_windows=max(1, int(max_windows)),
+                    )
+                    payload = occlusion_map(predict_fn, pre.resized, config)
+                    attribution = np.asarray(payload["map"], dtype=np.float32)
+                    note = (
+                        f"遮挡敏感度（窗口 {payload['windows']} 个，stride 缩放 "
+                        f"{payload['scale']:.2f}；{payload['note']}）"
+                    )
+                else:
+                    model = service.load(arch, weights_path)
+                    if str(method) == "Score-CAM":
+                        attribution = np.asarray(
+                            ScoreCAM(model, max_channels=32).generate(tensor), dtype=np.float32
+                        )
+                        note = "Score-CAM（激活掩膜前向打分，max_channels=32）"
+                    else:
+                        attribution = np.asarray(
+                            LayerCAM(model).generate(tensor), dtype=np.float32
+                        )
+                        note = "LayerCAM（逐通道 relu(梯度) 空间加权）"
+                if attribution.shape != prob_map.shape:
+                    import cv2
+
+                    attribution = cv2.resize(
+                        attribution, (prob_map.shape[1], prob_map.shape[0]),
+                        interpolation=cv2.INTER_LINEAR,
+                    ).astype(np.float32)
+                faith = faithfulness_report(prob_map, attribution)
+            elapsed = time.perf_counter() - started
+        except Exception as exc:
+            gr.Warning(f"归因生成失败：{exc}")
+            return None, placeholder, "归因失败，详见提示。"
+        rows = [
+            ["deletion AUC（越低越好）", _fmt(faith["deletion_auc"])],
+            ["insertion AUC（越高越好）", _fmt(faith["insertion_auc"])],
+            ["road（insertion − deletion）", _fmt(faith["road"])],
+            ["随机对照 deletion AUC", _fmt(faith["random_deletion_auc"])],
+            ["随机对照 insertion AUC", _fmt(faith["random_insertion_auc"])],
+            ["verdict", str(faith["verdict"])],
+        ]
+        status = f"**方法**：{note}　**耗时**：{elapsed * 1000:.0f} ms"
+        return attribution, rows, status
+
+    # ================= 形态图谱（WP-11，纯 CPU：掩膜/表格计算，不碰模型） =================
+    def atlas_fn():
+        type_placeholder = [["分型", "触发", "实测值", "阈值", "判定依据"]]
+        similar_placeholder = [["病例", "余弦距离", "元数据"]]
+        if not last_result:
+            gr.Warning("请先在「诊断」页完成一次分析")
+            return type_placeholder, similar_placeholder, ""
+        try:
+            result = last_result["result"]
+            extra = result.extra
+            instance_df = extra.get("instance_df")
+            clinical = extra.get("clinical")
+            ga_percent = getattr(getattr(clinical, "rloss", None), "r_loss_percent", float("nan"))
+            case_features = _atlas_case_features(result, instance_df, ga_percent)
+            evidence = classify_case(instance_df, case_features)
+            names = {rule.key: rule.name_zh for rule in TYPE_RULES}
+            type_rows = []
+            for item in evidence:
+                value_text = _num_text(item.value)
+                if item.unit and value_text != "N/A":
+                    value_text = f"{value_text} {item.unit}"
+                type_rows.append([
+                    names.get(item.key, item.key),
+                    "是" if item.present else "否",
+                    value_text,
+                    _num_text(item.threshold),
+                    item.definition,
+                ])
+            query = case_vector(case_features)
+            index_path = settings.atlas_index_path
+            if index_path is not None and Path(index_path).is_file():
+                index = AtlasIndex.load(index_path)
+                hits = index.search(query, k=5)
+                if hits:
+                    similar_rows = [
+                        [str(hit.get("case_id", "—")), _fmt(hit.get("distance"), 4),
+                         str(hit.get("meta") or "—")]
+                        for hit in hits
+                    ]
+                else:
+                    similar_rows = [["（索引为空，无已登记病例）", "—", "—"]]
+                note = f"图谱索引：`{Path(index_path)}`"
+            else:
+                similar_rows = [[f"图谱索引为空（{index_path}）", "—", "—"]]
+                note = "未找到图谱索引文件，只能展示分型证据；检索需先构建 AtlasIndex。"
+        except Exception as exc:
+            gr.Warning(f"形态分型失败：{exc}")
+            return type_placeholder, similar_placeholder, ""
+        return type_rows, similar_rows, note
+
+    # ================= 随访（WP-11，sqlite 读取，不碰模型） =================
+    def timeline_fn(patient_id):
+        empty_update = gr.update(choices=[], value=None)
+        placeholder = [["就诊 ID", "日期", "眼别", "眼睑", "影像", "备注", "测量项数"]]
+        pid = str(patient_id or "").strip()
+        if not pid:
+            gr.Warning("请输入患者 ID")
+            return placeholder, empty_update, empty_update, ""
+        db_path = settings.db_path
+        if db_path is None or not Path(db_path).is_file():
+            return placeholder, empty_update, empty_update, (
+                f"暂无随访数据库（将在首次写入时创建：{db_path}）"
+            )
+        try:
+            with ClinicStore(db_path) as store:
+                entries = store.timeline(pid)
+        except Exception as exc:
+            gr.Warning(f"时间线查询失败：{exc}")
+            return placeholder, empty_update, empty_update, ""
+        if not entries:
+            return placeholder, empty_update, empty_update, f"患者 {pid} 暂无就诊记录。"
+        rows = []
+        labels = []
+        for entry in entries:
+            rows.append([
+                f"#{entry.get('id')}",
+                str(entry.get("visit_date") or "—"),
+                str(entry.get("eye") or "—"),
+                str(entry.get("eyelid") or "—"),
+                str(entry.get("image_path") or "—"),
+                str(entry.get("note") or "—"),
+                str(len(entry.get("measurements") or {})),
+            ])
+            labels.append(_visit_label(entry))
+        base_update = gr.update(choices=labels, value=labels[-2] if len(labels) >= 2 else labels[0])
+        follow_update = gr.update(choices=labels, value=labels[-1])
+        return rows, base_update, follow_update, f"共 {len(entries)} 次就诊；已默认选中最近两次。"
+
+    def followup_compare_fn(patient_id, base_label, follow_label):
+        placeholder = [["测量项", "基线", "随访", "差值（随访 − 基线）"]]
+        pid = str(patient_id or "").strip()
+        base_id = _visit_id_from_label(base_label)
+        follow_id = _visit_id_from_label(follow_label)
+        if not pid or base_id is None or follow_id is None:
+            gr.Warning("请先查询时间线并选择两次就诊")
+            return placeholder, ""
+        db_path = settings.db_path
+        if db_path is None or not Path(db_path).is_file():
+            gr.Warning(f"暂无随访数据库（将在首次写入时创建：{db_path}）")
+            return placeholder, ""
+        try:
+            with ClinicStore(db_path) as store:
+                # 患者一致性校验（L-11）：下拉框可能残留上一位患者的就诊标签，
+                # 两次所选就诊都必须属于当前输入患者的时间线，否则警告并返回占位。
+                visits = {int(entry["id"]): entry for entry in store.list_visits(pid)}
+                if base_id not in visits or follow_id not in visits:
+                    gr.Warning("所选就诊不属于当前患者的时间线，请重新查询时间线后再对比")
+                    return placeholder, ""
+                base_measurements = store.measurements_for_visit(base_id)
+                follow_measurements = store.measurements_for_visit(follow_id)
+        except Exception as exc:
+            gr.Warning(f"随访对比失败：{exc}")
+            return placeholder, ""
+        rows = []
+        for key in sorted(set(base_measurements) | set(follow_measurements)):
+            base_value = base_measurements.get(key, float("nan"))
+            follow_value = follow_measurements.get(key, float("nan"))
+            if np.isfinite(base_value) and np.isfinite(follow_value):
+                delta_text = f"{follow_value - base_value:+.4g}"
+            else:
+                delta_text = "N/A"
+            rows.append([key, _num_text(base_value), _num_text(follow_value), delta_text])
+        if not rows:
+            rows = [["（两次就诊均无测量记录）", "—", "—", "—"]]
+        return rows, _pair_ecc_note(visits.get(base_id), visits.get(follow_id))
+
+    # ================= 分级（WP-11，纯计算零依赖） =================
+    def grade_fn(loss_percent):
+        try:
+            value = float(loss_percent)
+        except (TypeError, ValueError):
+            gr.Warning("请输入有效的 R_loss 百分比（0-100 的数字）")
+            return [["—", "—"]]
+        if not np.isfinite(value) or value < 0 or value > 100:
+            gr.Warning("R_loss 应为 0-100 之间的数字")
+            return [["—", "—"]]
+        return grade_table(value)[1:]  # 表头行已在组件 headers 中
+
+    # ================= 医生修正回流（WP-10 接线；纯 numpy/CPU，不持 GPU 串行锁） =================
+    # 审计由 governance 接线覆盖（inference 事件）
+    def load_model_mask_fn():
+        """把最近一次诊断的模型掩膜铺进修正画布（透明底 + 可编辑白前景图层）。"""
+        if not last_result:
+            gr.Warning("请先在「诊断」页完成一次分析")
+            return None
+        try:
+            model_mask = np.asarray(last_result["result"].binary_mask)
+            layer = np.zeros((model_mask.shape[0], model_mask.shape[1], 4), dtype="uint8")
+            layer[model_mask > 0] = (255, 255, 255, 255)
+            background = np.zeros_like(layer)
+        except Exception as exc:
+            gr.Warning(f"读取上次模型掩膜失败：{exc}")
+            return None
+        # 图层可被医生用橡皮擦除（删除）或笔刷补画（新增）；透明底撑起画布尺寸
+        return {"background": background, "layers": [layer], "composite": layer}
+
+    def submit_correction_fn(editor_value, reviewer_id_text, note_text):
+        """把画布上的修正掩膜落盘：record_correction + append_record。"""
+        if not last_result:
+            gr.Warning("请先在「诊断」页完成一次分析")
+            return "尚无最近诊断：修正未记录。"
+        try:
+            ink = _editor_ink_mask(editor_value)
+            if ink is None or not bool(ink.any()):
+                gr.Warning("请先在画布上绘制修正掩膜（白色笔迹；可先点「载入上次模型掩膜」）")
+                return "画布为空：修正未记录。"
+            result = last_result["result"]
+            model_mask = np.asarray(result.binary_mask)
+            edited = ink.astype("uint8")
+            if edited.shape != model_mask.shape:
+                import cv2
+
+                edited = cv2.resize(
+                    edited, (model_mask.shape[1], model_mask.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            case_id = f"ui_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            record = record_correction(
+                case_id, model_mask, edited,
+                reviewer_id=str(reviewer_id_text or "").strip() or "unknown",
+                note=str(note_text or ""),
+            )
+            row = append_record(record, settings, model_mask=model_mask, edited_mask=edited)
+        except Exception as exc:
+            gr.Warning(f"修正记录失败：{exc}")
+            return "修正未保存，详见提示。"
+        gr.Info(f"修正已记录：+{record.added_px} / −{record.removed_px}")
+        return (
+            f"**修正已记录**（{row['case_id']}）　新增 {record.added_px} px / "
+            f"删除 {record.removed_px} px　方向 {record.direction}　"
+            f"dice_before {_num_text(record.dice_before)}　"
+            f"dice(model↔edit) {_num_text(record.dice_after_vs_edit)}"
+        )
+
     # ================= 界面 =================
     style_kwargs = _launch_style_kwargs(gr)
     blocks_kwargs = {} if "css" in style_kwargs else {"css": CSS, "theme": _theme(gr)}
@@ -935,6 +1549,9 @@ def create_app(settings: Settings | None = None):
                         overlay_output = gr.Image(label="分割叠加", type="numpy")
                         with gr.Tabs():
                             with gr.Tab("概率热力图"):
+                                gr.Markdown(
+                                    "<div class='mgd-help'>概率伪彩（非归因）；归因请看「解释性」。</div>"
+                                )
                                 heatmap_output = gr.Image(label="概率热力图（非 Grad-CAM）", type="numpy")
                             with gr.Tab("True Grad-CAM"):
                                 gradcam_output = gr.Image(label="True Grad-CAM", type="numpy")
@@ -951,6 +1568,33 @@ def create_app(settings: Settings | None = None):
                         report_button = gr.Button("生成 HTML 临床报告")
                         report_file = gr.File(label="报告下载（HTML / CSV）")
                         report_status = gr.Markdown("")
+
+                # -------- 医生修正回流（WP-10 接线；纯 numpy/CPU，不持 GPU 串行锁） --------
+                with gr.Group():
+                    gr.Markdown("<div class='mgd-section-title'>医生修正回流</div>")
+                    gr.Markdown(
+                        "<div class='mgd-help'>在画布上用白色笔刷勾出修正后的腺体掩膜"
+                        "（笔刷直径可在画布工具栏调整）；可先点「载入上次模型掩膜」把模型输出铺成"
+                        "可编辑图层，再用笔刷补画 / 橡皮擦除。提交只落盘统计与掩膜哈希，"
+                        "不内嵌掩膜像素。</div>"
+                    )
+                    correction_editor = gr.ImageEditor(
+                        type="numpy",
+                        label="修正掩膜画布",
+                        brush=gr.Brush(default_color="#ffffff", colors=["#ffffff"],
+                                       color_mode="fixed"),
+                        height=320,
+                    )
+                    with gr.Row():
+                        correction_reviewer = gr.Textbox(label="评审人 ID", placeholder="如 dr_wang")
+                        correction_note = gr.Textbox(label="备注（可选）", placeholder="修正原因")
+                        load_mask_button = gr.Button("载入上次模型掩膜")
+                        submit_correction_button = gr.Button("提交修正", variant="primary")
+                    correction_status = gr.Markdown("")
+                    gr.Markdown(
+                        "<div class='mgd-help'>修正数据仅本地留存于 <code>db/corrections.jsonl</code>；"
+                        "导出训练候选用 <code>mgd-feedback export</code>。</div>"
+                    )
 
                 infer_button.click(
                     infer_fn,
@@ -973,6 +1617,12 @@ def create_app(settings: Settings | None = None):
                     inputs=[preset_name, tile_infer, tile_size, overlap, threshold, min_area,
                             smooth_on, sigma, roi_only, tta_radio, gradcam_checkbox],
                     outputs=[preset_dropdown, preset_status],
+                )
+                load_mask_button.click(load_model_mask_fn, outputs=[correction_editor])
+                submit_correction_button.click(
+                    submit_correction_fn,
+                    inputs=[correction_editor, correction_reviewer, correction_note],
+                    outputs=[correction_status],
                 )
 
             # -------- 训练 -------------
@@ -1173,6 +1823,131 @@ def create_app(settings: Settings | None = None):
                 demo.load(weights_table, outputs=weights_table_box)
                 demo.load(tiers_view, outputs=tiers_table)
 
+            # -------- 质控 -------------
+            with gr.Tab("质控"):
+                gr.Markdown(
+                    "<div class='mgd-help'>采集端质量门（WP-4）：对单帧灰度图做模糊 / 曝光 / 反光 / "
+                    "翻转不全-过度翻转 / 离焦 / 睫毛遮挡六类判定并给出 0-100 得分与处置建议。"
+                    "本页纯 CPU 计算，不加载模型；眼睑掩膜缺失时相关项记为「不可测」，绝不瞎猜。</div>"
+                )
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        qc_image = gr.Image(type="numpy", label="采集灰度图")
+                        qc_eyelid = gr.Image(type="numpy", label="眼睑掩膜（可选，按 >0 二值化）")
+                        qc_button = gr.Button("运行质控", variant="primary")
+                    with gr.Column(scale=3):
+                        qc_table = gr.Dataframe(
+                            headers=["项", "数值"], value=[["—", "—"]],
+                            interactive=False, label="质控报告（score / flags / 原始量 / 阈值）",
+                        )
+                        qc_action = gr.Markdown("")
+                qc_button.click(qc_fn, inputs=[qc_image, qc_eyelid],
+                                outputs=[qc_table, qc_action])
+
+            # -------- 解释性 -------------
+            with gr.Tab("解释性"):
+                gr.Markdown(
+                    "<div class='mgd-help'>真归因 + 忠实度证据（WP-3）：LayerCAM / Score-CAM 依赖"
+                    "「诊断」页的最近一次分析（复用当时的权重与推理参数）；遮挡敏感度对概率图滑窗"
+                    "扰动打分，与模型解耦。忠实度表给出 deletion / insertion AUC 与随机归因对照，"
+                    "防止「看起来像热力图」的伪归因混入交付。本页回调持 GPU 串行锁。</div>"
+                )
+                explain_method = gr.Radio(
+                    choices=["LayerCAM", "Score-CAM", "遮挡敏感度"], value="LayerCAM",
+                    label="归因方法",
+                )
+                with gr.Accordion("遮挡敏感度参数（仅该方法使用）", open=False):
+                    occl_window = gr.Slider(8, 256, value=64, step=8, label="窗口边长（px）")
+                    occl_stride = gr.Slider(4, 128, value=32, step=4, label="步长（px）")
+                    occl_max_windows = gr.Number(
+                        value=256, precision=0, label="窗口数上限",
+                        info="超出时步长自动翻倍以控制耗时",
+                    )
+                explain_button = gr.Button("生成归因", variant="primary")
+                attribution_output = gr.Image(label="归因图（[0,1]）", type="numpy")
+                faithfulness_table = gr.Dataframe(
+                    headers=["指标", "数值"], interactive=False, label="忠实度证据",
+                )
+                explain_note = gr.Markdown("")
+                explain_button.click(
+                    explain_fn,
+                    inputs=[explain_method, occl_window, occl_stride, occl_max_windows],
+                    outputs=[attribution_output, faithfulness_table, explain_note],
+                )
+
+            # -------- 形态图谱 -------------
+            with gr.Tab("形态图谱"):
+                gr.Markdown(
+                    "<div class='mgd-help'>对「诊断」页最近一次分析做 8 类形态学分型"
+                    "（dropout / shortening / tortuosity / thickening / beading / ghost / "
+                    "disruption / confluence），逐条给出实测值、阈值与判定依据；"
+                    "并按固定顺序特征向量在图谱索引中检索相似病例 Top-5。本页纯 CPU 计算。</div>"
+                )
+                atlas_button = gr.Button("对最近诊断做分型", variant="primary")
+                atlas_type_table = gr.Dataframe(
+                    headers=["分型", "触发", "实测值", "阈值", "判定依据"], interactive=False,
+                    label="8 类分型证据",
+                )
+                atlas_similar_table = gr.Dataframe(
+                    headers=["病例", "余弦距离", "元数据"], interactive=False,
+                    label="相似病例 Top-5",
+                )
+                atlas_note = gr.Markdown("")
+                atlas_button.click(atlas_fn,
+                                   outputs=[atlas_type_table, atlas_similar_table, atlas_note])
+
+            # -------- 随访 -------------
+            with gr.Tab("随访"):
+                gr.Markdown(
+                    "<div class='mgd-help'>纵向随访（WP-8）：按患者 ID 查询就诊时间线，"
+                    "选两次就诊对比测量差值；两次就诊都登记了本地影像文件时自动做 ECC 刚体配准并"
+                    "报告相关分数。数据库在首次写入时创建，本页只读、不碰模型。</div>"
+                )
+                with gr.Row():
+                    patient_text = gr.Textbox(label="患者 ID", placeholder="如 P001")
+                    timeline_button = gr.Button("查询时间线", variant="primary")
+                timeline_note = gr.Markdown("")
+                timeline_table = gr.Dataframe(
+                    headers=["就诊 ID", "日期", "眼别", "眼睑", "影像", "备注", "测量项数"],
+                    interactive=False, label="就诊时间线",
+                )
+                with gr.Row():
+                    base_visit = gr.Dropdown(choices=[], label="基线就诊")
+                    follow_visit = gr.Dropdown(choices=[], label="随访就诊")
+                    compare_button = gr.Button("对比", variant="primary")
+                delta_table = gr.Dataframe(
+                    headers=["测量项", "基线", "随访", "差值（随访 − 基线）"],
+                    interactive=False, label="Δ 指标",
+                )
+                compare_note = gr.Markdown("")
+                timeline_button.click(timeline_fn, inputs=[patient_text],
+                                      outputs=[timeline_table, base_visit, follow_visit,
+                                               timeline_note])
+                compare_button.click(followup_compare_fn,
+                                     inputs=[patient_text, base_visit, follow_visit],
+                                     outputs=[delta_table, compare_note])
+
+            # -------- 分级 -------------
+            with gr.Tab("分级"):
+                grade_headers = list(grade_table(0.0)[0])
+                gr.Markdown(
+                    "<div class='mgd-help'>双分级体系对照（WP-2）：同一 R_loss 分别按 "
+                    "Arita Meiboscore 与 Pult Meiboscale 分级。两套体系切点不同，级别不可直接互换，"
+                    "互斥声明见下方固定文本。纯计算，零依赖。</div>"
+                )
+                with gr.Row():
+                    loss_number = gr.Number(
+                        value=30.0, label="R_loss 腺体缺失率（%）",
+                        info="0-100；可从「诊断」页指标表读取",
+                    )
+                    grade_button = gr.Button("对照分级", variant="primary")
+                grade_table_box = gr.Dataframe(
+                    headers=grade_headers, value=[["—", "—"]],
+                    interactive=False, label="分级对照",
+                )
+                gr.Markdown(incompatibility_note())
+                grade_button.click(grade_fn, inputs=[loss_number], outputs=[grade_table_box])
+
         demo._mgd_launch_style = style_kwargs  # launch() 取用（Gradio 6）
         return demo
 
@@ -1184,7 +1959,11 @@ def _bind_train_button(button, handler, inputs, outputs):
 
 def _preset_apply_handler(settings, loader):
     def apply(name):
-        values = loader(settings).get(name)
+        try:
+            presets = loader(settings)
+        except MGDError as exc:
+            return (False, 384, 0.25, 0.70, 120, True, 1.2, True, TTA_OFF, False, exc.user_message())
+        values = presets.get(name)
         if not values:
             return (False, 384, 0.25, 0.70, 120, True, 1.2, True, TTA_OFF, False, "预设不存在")
         return (
@@ -1232,6 +2011,15 @@ def launch(settings: Settings | None = None) -> None:
         except (AttributeError, TypeError):
             app.queue()
     auth = ((("mgd", settings.auth_token),) if settings.auth_token else None)
+    if auth is None:
+        host_text = str(settings.host or "")
+        if host_text not in ("127.0.0.1", "localhost", "::1"):
+            # 不阻断启动（Docker 容器依赖 0.0.0.0），但必须让操作者看到风险
+            print(
+                f"[安全警告] auth_token 为空且绑定在 {host_text}：WebUI 对外无认证。"
+                "请在局域网隔离/防火墙保护下使用，或用 --auth 设置访问口令。",
+                flush=True,
+            )
     style_kwargs = getattr(app, "_mgd_launch_style", {})
     app.launch(
         server_name=settings.host,

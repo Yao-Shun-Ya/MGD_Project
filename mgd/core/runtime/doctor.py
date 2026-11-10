@@ -205,7 +205,7 @@ def _check_write(settings: Settings) -> Check:
 def first_run_hint(settings: Settings) -> str:
     steps = [
         f"1) 放置数据：{settings.data_dir}/images|gland_masks|eyelid_masks",
-        f"2) 划分：python -m mgd.adapters.cli.data_cli split",
+        f"2) 划分：python -m mgd.adapters.cli.data_cli splits",
         f"3) 冒烟：mgd-train --profile quick --vram auto",
         f"4) 评估：mgd-eval --scope test",
     ]

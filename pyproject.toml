@@ -18,23 +18,26 @@ classifiers = [
 dynamic = ["version"]
 
 # 说明：PyTorch 与 gradio 不放在基础依赖里，按平台/交付端选择安装（见 docs/engineering/RUNBOOK.md）。
-# 基础依赖版本与 2026-11-07 实测环境一致。
+# 版本下限一律取「实测环境已安装的版本」——本项目不承诺未验证的旧版本（无历史用户）。
+# 实测环境：Python 3.10.6 / torch 2.5.1+cu121 / 2026-11-10。
 dependencies = [
   "numpy==1.26.4",
-  "opencv-python>=4.8.0.74,<5",
-  "Pillow>=10.4,<13",
+  "opencv-python==4.8.0.74",
+  "Pillow==12.2.0",
   "scikit-image==0.25.2",
-  "monai>=1.5.2,<1.6",
+  "monai==1.5.2",
   "pandas==2.3.3",
   "matplotlib==3.10.8",
   "scipy==1.15.3",
-  "PyYAML>=6.0,<7",
+  "PyYAML==6.0.3",
 ]
 
 [project.optional-dependencies]
 ui = ["gradio==6.16.0"]
+# PDF 报告为可选路径：本机未安装 weasyprint，未实测（见 KNOWN_LIMITATIONS）
 pdf = ["weasyprint>=62,<63"]
-dev = ["pytest>=7", "pytest-timeout>=2"]
+dicom = ["pydicom>=3.0", "highdicom>=0.28"]
+dev = ["pytest>=9.2"]
 # 训练/推理后端二选一（实际安装需配合官方 wheel 源，见 RUNBOOK）
 cuda = ["torch==2.5.1"]
 cpu = ["torch==2.5.1"]
@@ -49,6 +52,12 @@ mgd-pipeline = "mgd.adapters.cli.pipeline_cli:main"
 mgd-data = "mgd.adapters.cli.data_cli:main"
 mgd-ablation = "mgd.ablation_runner:main"
 mgd-verify-pipeline = "mgd.verify_pipeline:main"
+mgd-qc = "mgd.adapters.cli.qc_cli:main"
+mgd-atlas = "mgd.adapters.cli.atlas_cli:main"
+mgd-followup = "mgd.adapters.cli.followup_cli:main"
+mgd-report = "mgd.adapters.cli.report_cli:main"
+mgd-logs = "mgd.adapters.cli.logs_cli:main"
+mgd-feedback = "mgd.adapters.cli.feedback_cli:main"
 
 [project.urls]
 Documentation = "docs/engineering/RUNBOOK.md"

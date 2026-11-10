@@ -32,7 +32,10 @@ def run_summary(run_dir: Path) -> dict[str, Any]:
     env = _load_json(run_dir / "env.json")
     reference = _load_json(run_dir / "reference_report.json")
     config_path = run_dir / "config.yaml"
-    config_text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    try:
+        config_text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    except OSError:
+        config_text = ""
     config: dict = {}
     if config_text:
         try:
@@ -54,17 +57,12 @@ def run_summary(run_dir: Path) -> dict[str, Any]:
         "peak_vram_gb": result.get("peak_vram_gb"),
         "samples_per_second": result.get("samples_per_second"),
         "wall_seconds": result.get("wall_seconds"),
-        "split_signature": reference.get("split_signature") or _split_signature_from_config(config),
+        "split_signature": reference.get("split_signature") or "",
         "verified": bool(reference.get("valid")),
         "created_at": env.get("created_at") or "",
         "pretrained": (train.get("pretrained")),
         "model_name": train.get("model_name") or "",
     }
-
-
-def _split_signature_from_config(config: dict) -> str:
-    split = config.get("resolved_yaml", {}).get("data", {})
-    return "" if not split else ""
 
 
 def list_runs(settings: Settings | None = None) -> list[dict[str, Any]]:

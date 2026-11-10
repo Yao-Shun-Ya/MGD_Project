@@ -16,7 +16,21 @@ from ...core.runtime.errors import MGDError
 from ...core.runtime.logging import configure_logging
 from ...core.training.config_file import build_train_config
 from ...core.training.presets import apply_tier, detect_vram_gb, profile_overrides
+from ...core.training.specs import SPEC_BY_NAME, coerce_value, parse_set_expression
 from ...core.workflow.pipeline import STAGES, run_pipeline
+
+
+def _reapply_explicit(config, expressions: list[str]):
+    """--set 在档位之上再落一次（与 train_cli 同语义：显式覆盖 > 档位安全默认）。"""
+    import dataclasses
+
+    for expression in expressions:
+        section, key, raw = parse_set_expression(expression)
+        spec = SPEC_BY_NAME[f"{section}.{key}"]
+        if spec.field == "_output_dir":
+            continue
+        config = dataclasses.replace(config, **{spec.field: coerce_value(spec, raw)})
+    return config
 
 
 def _parse_folds(text: str) -> list[int]:
@@ -69,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                 cli_overrides=list(args.set),
             )
             config, tier_info = apply_tier(config, args.vram, detect_vram_gb())
+            config = _reapply_explicit(config, list(args.set))
             for fold in _parse_folds(args.folds):
                 import dataclasses
 

@@ -45,8 +45,12 @@ class SplitResult:
     val: list[Pair]
     test: list[Pair]
     warnings: list[str] = field(default_factory=list)
+    assignment_signature: str = ""
 
-    def __len__(self) -> str:
+    def __len__(self) -> int:
+        return len(self.train) + len(self.val) + len(self.test)
+
+    def summary(self) -> str:
         return f"train={len(self.train)} val={len(self.val)} test={len(self.test)}"
 
 

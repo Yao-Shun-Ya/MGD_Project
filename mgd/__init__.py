@@ -4,4 +4,4 @@
 工程冻结基线：见 docs/engineering/FREEZE_BASELINE.md。
 """
 
-__version__ = "2.3.0"
+__version__ = "2.5.0"

@@ -17,6 +17,7 @@ import torch
 
 from ... import __version__
 from ..config import Settings, get_settings
+from ..governance.hooks import audit_event
 from ..runtime.errors import MGDError
 from .manifest import (
     NORMALIZATION_TAG,
@@ -25,14 +26,14 @@ from .manifest import (
     validate_weight,
     write_manifest,
 )
-from .loader import arch_from_state_dict, load_any
-from .registry import create_model, normalize_model_name
+from .loader import _build_matching_model, _load_state_dict, arch_from_state_dict, load_any
+from .registry import normalize_model_name
 
 
 def _structure_check(weights: Path, arch: str) -> None:
-    state = load_any(weights)
-    model = create_model(arch)
-    model.load_state_dict(state, strict=True)
+    """结构校验：按权重的实际输出通道数构建模型（双通道契约权重的默认路径）。"""
+    state = _load_state_dict(weights)
+    model = _build_matching_model(arch, state)
     del model
 
 
@@ -122,7 +123,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"结构提示为 {guessed}，与 --arch {arch} 不一致", file=sys.stderr)
         return 1
 
-    _structure_check(args.weights, arch)
+    try:
+        _structure_check(args.weights, arch)
+    except MGDError as exc:
+        print(f"[结构校验失败] {exc.user_message()}", file=sys.stderr)
+        return 1
 
     verified = False
     reference = None
@@ -151,6 +156,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     write_manifest(manifest, args.weights)
     status = validate_weight(args.weights, arch, settings=settings)
+
+    # 权重治理是硬治理：manifest 落盘后必留审计痕（strict=True —— 审计失败比
+    # 业务失败更严重，无法留痕的转正/拒绝必须让整个 verify 失败）
+    audit_event(
+        settings,
+        "weight_verify",
+        actor="local",
+        payload={
+            "weights": args.weights.name,
+            "sha256": str(manifest.sha256)[:12],
+            "verified": bool(status.status == "verified"),
+        },
+        strict=True,
+    )
 
     print(f"sha256 : {sha256_file(args.weights)}")
     print(f"arch   : {arch}")

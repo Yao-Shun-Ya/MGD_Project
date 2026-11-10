@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..config import Settings
+from ..governance.hooks import audit_event
 from ..runtime.logging import get_logger
 
 logger = get_logger("data.versioning")
@@ -200,12 +202,23 @@ def record_version(
         },
     }
     target = settings.data_dir / "dataset_version.json"
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 原子写（与 splits.py 的持久化同一标准），中断不留半截版本记录
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return payload
 
 
 def backup_dataset(settings: Settings, target_dir: str | Path | None = None) -> Path:
-    """备份影像与掩膜到带时间戳目录；只复制，不移动、不覆盖。"""
+    """备份影像与掩膜到带时间戳目录；只复制，不移动、不覆盖。
+
+    备份成功后写 ``dataset_backup`` 审计事件（非阻塞；payload 只含目标目录与
+    文件/配对计数，不含任何文件名之外的内容信息）。
+    """
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if target_dir is None:
         target = settings.home / "backups" / f"dataset_backup_{stamp}"
@@ -241,5 +254,19 @@ def backup_dataset(settings: Settings, target_dir: str | Path | None = None) -> 
     }
     (target / "backup_manifest.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    # 治理审计（非阻塞）：备份属于数据治理动作，成功后必须可追溯。
+    # 「配对数」按 images∩gland_masks 的 stem 交集计（与 pairing 口径一致）。
+    image_stems = {path.stem for path in _files(settings.images_dir)}
+    gland_stems = {path.stem for path in _files(settings.gland_masks_dir)}
+    audit_event(
+        settings,
+        "dataset_backup",
+        actor="system",
+        payload={
+            "target": str(target),
+            "pairs": len(image_stems & gland_stems),
+            "files": len(manifest),
+        },
     )
     return target

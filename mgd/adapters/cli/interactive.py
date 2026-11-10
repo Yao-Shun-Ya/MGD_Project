@@ -40,17 +40,20 @@ def run_menu() -> int:
     split_mode = _ask("划分模式 (holdout/kfold)", "holdout")
     tile = _ask("分块训练 (y/n)", "y")
 
+    # 全部走 --set（schema 唯一来源）：学习率/划分比例等参数在 train_cli 的 parser 里
+    # 没有快捷旗标，旧实现直接传旧快捷旗标必然 argparse 报错；--set 在档位之上再落一次，
+    # 不会被显存档吞掉。
     argv = [
         "--model", model,
         "--epochs", epochs,
         "--batch-size", batch_size,
-        "--lr", lr,
-        "--val-ratio", val_ratio,
-        "--test-ratio", test_ratio,
-        "--split-mode", split_mode,
+        "--set", f"train.lr={lr}",
+        "--set", f"data.val_ratio={val_ratio}",
+        "--set", f"data.test_ratio={test_ratio}",
+        "--set", f"data.split_mode={split_mode}",
     ]
     if tile.lower().startswith("n"):
-        argv.append("--no-tile")
+        argv.extend(["--set", "data.tile_mode=false"])
     return cli_main(argv)
 
 

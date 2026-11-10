@@ -35,7 +35,8 @@ def test_schema_fields_exist_in_train_config():
 
 
 def test_schema_sections_are_consistent():
-    assert set(SCHEMA) == {"run", "data", "model", "train", "eval", "artifacts"}
+    # v2.4.0 接口扩展：新增 infer 段（qc_policy / explain_method），见 AGENT_TASK §4
+    assert set(SCHEMA) == {"run", "data", "model", "train", "eval", "infer", "artifacts"}
     assert {"train.epochs", "model.name", "run.vram_tier"} <= {spec.name for spec in SPECS}
 
 

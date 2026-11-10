@@ -147,3 +147,47 @@
 - clDice（Shit et al., 2021）；Boundary loss（Kervadec et al., 2019）；深监督（Lee et al., 2015）。
 - 温度标定（Guo et al., 2017）；bootstrap CI 与 Wilcoxon 的检验协议为标准做法。
 - 待文献矩阵到位后可替换措辞与引用编号，**不影响上述工程决议**。
+
+---
+
+## 12. ADR-002：可解释性必须过忠实度检验
+
+- 状态：**已定稿并实施**（v2.4.0）
+- 背景：`generate_heatmap(prob, gray)` 只是概率图伪彩，信息量等于分割掩膜本身，把它当
+  "热力图/归因" 展示是伪解释。
+- 决议：
+  1. 概率伪彩在 UI 中必须标注「概率伪彩（非归因）」；真归因走 `mgd.core.explain`
+     （LayerCAM / Score-CAM / 遮挡敏感度）。
+  2. 任何归因图进入报告/UI 前，必须给出忠实度证据（deletion / insertion AUC 与随机对照、
+     verdict pass/fail）；verdict=fail 的归因图只能标注为「仅供排查参考」。
+  3. 归因实现禁止：内部偷偷降采样、返回全零/全 NaN 图糊弄（必须显式抛错）、
+     hook 泄漏（异常路径必须清理）。
+- 验收门：`quality/gates` 与 `tests/test_explain.py` 的「假归因防回归门」
+  （attribution=随机噪声 → verdict 必须为 fail）。
+
+## 13. ADR-003：指标必须注册且带定义/单位/来源
+
+- 状态：**已定稿并实施**（v2.4.0）
+- 背景：临床量化指标若没有定义公式、单位与文献来源，就会产生「看起来专业但无法解释」
+  的数值——在医疗语境下这是不可接受的。
+- 决议：
+  1. 一切进入报告/UI 的量化指标必须在 `mgd.core.quantification.registry` 注册
+     （`MetricSpec(key, name_zh, definition, unit, source, requires, higher_is_better)`）。
+  2. `source` 只允许三类词表：文献标识（"Arita et al. 2008" / "Pult & Nichols 2016"）
+     或 "engine-defined"（工程定义，必须显式承认）。
+  3. 没有定义的指标不许写进代码；报告渲染时同时给出定义与来源。
+  4. 缺失输入一律 NaN + 说明，绝不用 0 冒充（沿用 v2.3.0 纪律）。
+- 验收门：`quality/gates/g03_metric_registry_integrity.py`（131 项检查）。
+
+## 14. ADR-004：分级体系不可互换
+
+- 状态：**已定稿并实施**（v2.4.0）
+- 背景：Arita meiboscore（4 级，切点 1/3、2/3）与 Pult Meiboscale（5 级，切点 25/50/75）
+  对同一缺失率会给出不同级别（如 30% → Arita 1 / Pult 2）。
+- 决议：
+  1. `mgd.core.grading` 同时提供两套分级，输出必须并排呈现并附「不可直接互换」固定文案。
+  2. 禁止在报告中只展示其中一套而不声明口径；禁止把一套的级别直接映射成另一套。
+  3. Arita 的「≤5% 归 0」是本项目操作化（与 `clinical.meiboscore_from_rloss` 对齐），
+     在 definition 中显式注明，不是文献原义。
+  4. NaN 输入返回 -1 + warning，不抛异常、不猜级别。
+- 验收门：`quality/gates/g16_grading_crosscheck.py`（101 点逐点交叉验证）。

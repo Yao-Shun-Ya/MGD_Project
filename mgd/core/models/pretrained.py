@@ -18,10 +18,31 @@ _CACHE_PREFIX = {
 
 
 def _candidate_files(source: str) -> list[Path]:
+    """按优先级收集预训练权重候选：MGD_PRETRAINED_DIR > 文档承诺的默认目录 > HF 缓存。
+
+    修复记录：此前只查环境变量，文档中的默认目录
+    `<root>/models_weights/pretrained` 从未被代码覆盖——不设环境变量时
+    即使权重就位也会「明确降级为随机初始化」。
+    """
+    from ..config import get_settings
+
     candidates: list[Path] = []
+    bases: list[Path] = []
     local = os.environ.get("MGD_PRETRAINED_DIR")
     if local:
-        base = Path(local)
+        bases.append(Path(local))
+    try:
+        settings = get_settings()
+        bases.append(settings.model_dir / "pretrained")
+        bases.append(settings.home / "models_weights" / "pretrained")
+    except Exception:  # settings 不可用时只依赖环境变量
+        pass
+    seen: set[Path] = set()
+    for base in bases:
+        base = base.resolve() if base.exists() else base
+        if base in seen:
+            continue
+        seen.add(base)
         for name in (f"{source}.safetensors", f"{source}.bin", f"{source}.pth"):
             candidates.append(base / name)
     hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
@@ -130,6 +151,17 @@ def _remap(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
                     mapped[f"{base_target}.{target_suffix}"] = value
 
             block_index += 1
+
+    # ---- 各 stage 输出 LayerNorm：HF layer_norm.{i} → 本实现 encoder.norms.{i} ----
+    # 缺失时 4 个 stage 输出归一化保持随机初始化，迁移效果静默劣化
+    for index in range(4):
+        for target_suffix, names in (
+            (f"encoder.norms.{index}.weight", (f"layer_norm.{index}.weight", f"norm.{index}.weight")),
+            (f"encoder.norms.{index}.bias", (f"layer_norm.{index}.bias", f"norm.{index}.bias")),
+        ):
+            value = _pick(state, prefix, names)
+            if value is not None:
+                mapped[target_suffix] = value
     return mapped
 
 

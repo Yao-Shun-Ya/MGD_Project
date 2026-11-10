@@ -55,15 +55,27 @@ def _binary(mask: np.ndarray | None, shape: tuple[int, int] | None = None) -> np
     return arr
 
 
+def _fmt_or_na(value: float, digits: int = 3) -> str:
+    """定量指标的统一渲染：非有限值一律 "N/A"（不许用 0 冒充）。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"{number:.{digits}f}" if np.isfinite(number) else "N/A"
+
+
 def meiboscore_from_rloss(r_loss_percent: float) -> int:
-    """0–3 级（Arita 2008 四档口径；本项目将 <5% 归为 0 级正常）。"""
+    """0–3 级（Arita 2008 四档口径；本项目将 <5% 归为 0 级正常）。
+
+    边界用精确的 1/3、2/3（100/3、200/3）比较，避免 66.67% 被误判为 2 级。
+    """
     if not np.isfinite(r_loss_percent):
         return -1
     if r_loss_percent <= 5.0:
         return 0
-    if r_loss_percent <= 33.3:
+    if r_loss_percent <= 100.0 / 3.0:
         return 1
-    if r_loss_percent <= 66.7:
+    if r_loss_percent <= 200.0 / 3.0:
         return 2
     return 3
 
@@ -258,12 +270,33 @@ def calculate_clinical_metrics(
     gland_mask: np.ndarray,
     eyelid_mask: np.ndarray | None = None,
     min_area: int = 120,
+    gray_img: np.ndarray | None = None,
 ) -> ClinicalResult:
-    """汇总临床指标；空掩膜返回 NaN 并给出 warning，n=0 不崩溃。"""
+    """汇总临床指标；空掩膜返回 NaN 并给出 warning，n=0 不崩溃。
+
+    ``gray_img``（v2.5.0 新增，可选）为同一分辨率下的灰度原图，仅用于信号指数
+    SI；不传或形状不符时 SI 记 "N/A"（不猜测、不填 0）。
+
+    summary 契约（v2.5.0 冻结）：
+    - 前 10 行为 v2.4.0 口径，键名与顺序不得改动；
+    - 末 4 行按 GA / DI / TI / SI 顺序追加，两套分支（空掩膜 / 正常）行数与键名
+      完全一致，由 quality/gates/g17 断言锁定；
+    - 四个 key 与 ``quantification.registry`` 中同名指标一一对应（定义/单位/来源
+      见该注册表），本函数不另造口径。
+    """
     gland = _binary(gland_mask)
     result = ClinicalResult()
     result.rloss = r_loss(gland, eyelid_mask)
     result.warnings.extend(result.rloss.warnings)
+
+    # 延迟导入：quantification.morphometry 反向依赖本模块的骨架/曲率实现，
+    # 顶层导入会形成循环；函数级导入在调用期已无环，且不破坏 g08 的分层断言。
+    from ..quantification.morphometry import (
+        diameter_deformation_index,
+        gland_area_ratio,
+        signal_index,
+        width_profile,
+    )
 
     total_area = int(gland.sum())
     if total_area == 0:
@@ -281,6 +314,10 @@ def calculate_clinical_metrics(
             ["实例级平均曲率 κ 均值", "N/A"],
             ["截断腺体占比", "N/A"],
             ["量化口径", "像素未标定，比例为相对值；R_loss 以眼睑 ROI 为分母"],
+            ["腺体面积占比 GA (%)", _fmt_or_na(gland_area_ratio(gland, eyelid_mask), 2)],
+            ["直径形变指数 DI", "N/A"],
+            ["弯曲度指数 TI", "N/A"],
+            ["信号指数 SI", "N/A"],
         ]
         return result
 
@@ -298,6 +335,17 @@ def calculate_clinical_metrics(
     kappa_mean = _mean("平均曲率κ")
     trunc_ratio = truncation_ratio(df)
 
+    # GA / DI / TI / SI：与 quantification.registry 同名指标共用同一实现，不另造口径。
+    # TI = 逐实例 (τ − 1) 的均值 = mean(τ) − 1（均值线性，两种算法等价）。
+    ga = gland_area_ratio(gland, eyelid_mask)
+    di = diameter_deformation_index(width_profile(gland))
+    ti = float(tau_mean - 1.0) if np.isfinite(tau_mean) else float("nan")
+    gray_array = None if gray_img is None else np.asarray(gray_img)
+    if gray_array is not None and gray_array.shape == gland.shape:
+        si = signal_index(gray_array, gland)
+    else:
+        si = float("nan")
+
     def fmt(value: float) -> str:
         return "N/A" if not np.isfinite(value) else f"{value:.3f}"
 
@@ -314,6 +362,10 @@ def calculate_clinical_metrics(
         ["实例级平均曲率 κ 均值", fmt(kappa_mean)],
         ["截断腺体占比", "N/A" if not np.isfinite(trunc_ratio) else f"{trunc_ratio:.2%}"],
         ["量化口径", "像素未标定，比例为相对值；R_loss 以眼睑 ROI 为分母"],
+        ["腺体面积占比 GA (%)", _fmt_or_na(ga, 2)],
+        ["直径形变指数 DI", _fmt_or_na(di)],
+        ["弯曲度指数 TI", _fmt_or_na(ti)],
+        ["信号指数 SI", _fmt_or_na(si)],
     ]
     return result
 

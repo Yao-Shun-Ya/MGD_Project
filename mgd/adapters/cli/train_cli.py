@@ -5,8 +5,9 @@
     mgd-train --config cfg.yaml --set model.name=UNet --set train.epochs=10
     mgd-train --print-schema
 
-优先级：默认 YAML < 用户 YAML < 预设 < --set / 快捷参数 < 显存档（安全边界）。
-显存档会覆盖分块/batch/AMP 等安全相关字段；若确实要突破，请改档位而不是改分块。
+优先级：默认 YAML < 用户 YAML < 预设 < 显存档（安全默认） < --set / 快捷参数（显式覆盖）。
+显存档先给出分块/batch/AMP 的安全默认；`--set` 与快捷参数在其之后再次生效，
+用于显式突破档位——突破后显存风险由使用者自负（OOM 时请降档位而不是改分块）。
 """
 from __future__ import annotations
 

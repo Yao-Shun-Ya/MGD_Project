@@ -1,10 +1,10 @@
 <div align="center">
   <h1>👁️ 腺而易见 · MGD_Project</h1>
-  <p><b>v2.3.0 · 公开基准 · 患者级划分 · Windows WebUI / Linux CLI</b></p>
+  <p><b>v2.5.0 · 公开基准 · 患者级划分 · Windows WebUI / Linux CLI</b></p>
   <p>
     <a href="https://xianeryijian.icu/"><img src="https://img.shields.io/badge/Website-xianeryijian.icu-0088F8?style=for-the-badge&logo=world-wide-web&logoColor=white" alt="Website"></a>
     <a href="https://github.com/Yao-Shun-Ya/MGD_Project"><img src="https://img.shields.io/badge/GitHub-MGD_Project-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
-    <img src="https://img.shields.io/badge/Version-v2.3.0-success?style=for-the-badge" alt="Version">
+    <img src="https://img.shields.io/badge/Version-v2.5.0-success?style=for-the-badge" alt="Version">
     <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-2ea44f?style=for-the-badge" alt="Platform">
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue?style=for-the-badge" alt="License">
   </p>
@@ -16,7 +16,7 @@
 <details>
 <summary><h2 style="display:inline">📑 目录 (Table of Contents)</h2></summary>
 
-1. [当前状态：v2.3.0 与 2026-11 基准](#0-当前状态v230-与-2026-11-基准)
+1. [当前状态：v2.5.0（基准 v2.3.0）](#0-当前状态v250基准-v230)
 2. [临床背景与任务定义](#1-临床背景与任务定义)
 3. [基准协议：患者级划分与泄漏审计](#2-基准协议患者级划分与泄漏审计)
 4. [2026-11 患者级实测结果](#3-2026-11-患者级实测结果)
@@ -36,7 +36,7 @@
 
 ---
 
-## 0. 当前状态：v2.3.0 与 2026-11 基准
+## 0. 当前状态：v2.5.0（基准 v2.3.0）
 
 这个仓库不是“又放一个 U-Net 权重”的 demo，而是一套**可审计的 MGD 分割与定量分析工程**。v2.3.0 的核心变化：
 
@@ -195,17 +195,20 @@ $$
 
 工程默认 `clip_limit=0.02`，`alpha=2.0`。训练、验证与推理共用同一 `load_gray → resize → CLAHE → /255` 管线，避免“训练一套、推理另一套”。
 
-### 4.2 MGD-Former：MiT-B2 + stride-4 融合解码器
+### 4.2 MGD-Former：MiT-B2 融合解码器
 
 MGD-Former 是本仓库的默认模型，但不是“唯一卖点”：
 
 - 编码器：SegFormer **MiT-B2**，四阶段 stride 4/8/16/32，通道 64/128/320/512。
-- 解码器：在 **1/4 与 1/8** 分辨率做自顶向下融合，最终 **stride=4** 输出；3–8 像素宽的腺体不会在 1/16 特征图上消失。
+- 解码器：四级特征经 1×1 proj 统一通道后在 **stride 32 分辨率**自顶向下融合，再上采样回原图。
+  **如实说明**：这与 ADR 中「在 1/4 与 1/8 分辨率融合、stride=4 输出」的原始设计不一致——
+  当前实现是 stride-32 融合 + 单次上采样；2026-11 患者级基准的全部数字都在该实现上测得。
+  FPN 式 stride-4 融合列入 v2.4.0 架构演进项，实施后必须重训并在同一协议下重新对比。
 - 双通道头：腺体（主任务）+ 睑缘（辅助任务），共享编码器。
-- 三个深监督头：1/4、1/8、1/16。
-- 预训练：ADE20K MiT-B2 编码器；本地加载 **323 个张量，编码器覆盖率 97.29%**。加载失败的张量会记录在 run 的 `pretrained_status`，不会静默假装成功。
+- 深监督：3 个 1×1 辅助头（当前实现共享 stride-32 融合特征插值到 1/4、1/8、1/16，多尺度多样性有限，见 KNOWN_LIMITATIONS）。
+- 预训练：ADE20K MiT-B2 编码器；本地加载 331 个张量、覆盖率 **99.7%**（2026-11-09 补齐 stage 输出 LayerNorm 映射并修复默认目录发现；此前的 2026-11 基准为 323 张量 / 97.29%）。加载失败的张量会记录在 run 的 `pretrained_status`，不会静默假装成功。
 
-选择 stride=4 的理由：在 640×1280 输入下，腺体宽度只有 3–8 px；stride 16 会把目标压到亚像素，断裂先于 Dice 出现，并集中体现在 HD95 与骨架连续性上。
+高分辨率融合的动机仍然成立：在 640×1280 输入下，腺体宽度只有 3–8 px；stride 16 会把目标压到亚像素，断裂先于 Dice 出现，并集中体现在 HD95 与骨架连续性上。
 
 ### 4.3 UNet（统一协议基线）
 
@@ -405,6 +408,47 @@ outputs_mgd/runs/<UTC>_<name>_<git>_<fingerprint>/
 - **结果注入正则**：宏名里的 `\g` 被当反向引用；改为函数替换。
 - **启动器换行**：`.bat` 是 LF，`cmd.exe` 解析失败；统一 ASCII + CRLF。
 
+### 8.3 2026-11-09 深度审计修复清单（v2.3.0 补丁）
+
+逐行正确性审计（训练/推理/数据/评估/UI/网站服务端）后的修复，全部带回归测试
+（`mgd/tests/test_2026_11_regressions.py`，全套 166 项通过）：
+
+**正确性（high）**
+- **交互菜单必崩**：`mgd.adapters.cli.interactive` 传了 `train_cli` parser 不存在的参数（--lr/--val-ratio 等）；改为全部走 `--set`（schema 唯一来源）。
+- **引擎自建划分不是患者级**：`core/data/splits.py` 的 holdout/kfold 原为逐 stem 随机洗牌；现在按文件名 ≥6 位患者编号整组分配（与 `mgd.core.data.splits` 同公式）。MGD-1K 的持久化患者级划分不受影响（照常复用）；新数据集不再有患者级泄漏。
+- **assignment_signature 补全**：引擎此前只算文件清单签名；现在计算并持久化「实际派分签名」（同一 `mgd.core.data.splits` 口径），`reference_report.json` 携带双签名；复用持久化划分时若请求 spec 与存储 spec 不一致会显式告警。
+- **ROI 回退误判 Meiboscore 3 级**：ROI 冲突回退后曾拿全图当眼睑分母（R_loss≈90%）；改为传 None，走「缺 ROI → NaN + 警告」的诚实分支。
+- **verify 转正链路断裂**：`mgd-verify` 的结构校验用 out_channels=1 构建模型，双通道契约权重必然崩溃；改用通道探测 + 匹配构建。
+- **预设白名单丢 gradcam**：保存时写入 gradcam，白名单不含该键 → 应用时静默丢失；已补。
+- **WebUI 训练不持 WORK_LOCK**：训练与推理/评估可并发争抢显存（设计声明是串行化）；训练 worker 现已持同一把锁。
+
+**健壮性（medium）**
+- transforms 用 lambda 不可 pickle → `functools.partial`，Windows 下 `num_workers>0` 可用（此前 spawn 必崩）；`run.num_workers` 帮助文案同步更新。
+- NaN 绕过一切参数范围校验（`--set train.lr=nan` 会静默空转训练）→ coerce 显式拒绝 NaN 与非整浮点。
+- best 权重保存 / `publish_best` / 预设文件 / `dataset_version.json` / 流水线状态 → 全部原子写（tmp + replace）。
+- `--resume` 指向不存在路径：先解析再建 run 目录（不再留孤儿目录），报错走用户消息通道。
+- 检查点加载拒绝更高 `format_version`；save 失败清理 .tmp。
+- `create_run` 同名后缀叠加（`_2_3_4`）→ 基于 base_id 递增。
+- clDice warmup=0 曾被当作 1 轮预热（首轮权重恒 0）→ warmup=0 即满权重。
+- 梯度累积尾组（不满 accum 步）按实际组大小缩放。
+- `TrainConfig` 三个默认值与 specs schema 对齐（amp/publish_best/export_reference_report）。
+- `MGD-PriorNet + dual_task=false` 组合在入口显式报错（此前训练中途崩溃）。
+- 训练期验证滑窗 overlap 从硬编码 0.25 改为读 `eval.tile_overlap`。
+- `mgd-eval` 的「权重未通过验证」提示读错层级（永远误报）→ 读 `extra`。
+- 评估逐样本容错扩大到坏图/损坏掩膜（不再中止整场评估）。
+- 消融参考模型缺失时显式标注（note 误标 "reference"）+ LaTeX 模型名转义。
+- `SplitResult.__len__` 返回 str → int（曾会让 `len()`/真值判断崩溃）。
+- TTA ASCII 写法（"2x"/"8x"）静默降级为关闭 → 归一分支补全；UI 显示归一后档位。
+- 轮廓可视化硬编码 0.5 阈值（与默认 0.7 脱节）→ 用实际 applied_threshold。
+- ADE20K 预训练映射补 stage 输出 LayerNorm（`layer_norm.{i}` → `encoder.norms.{i}`），覆盖率 **0.9729 → 0.997**（323 → 331 张量；仅剩 patch1.proj 因 HF 3 通道输入与本地 1 通道 shape 不符按设计排除）；同时修复默认预训练目录从未被代码覆盖的问题（此前不设 `MGD_PRETRAINED_DIR` 环境变量时，即使权重在 `models_weights/pretrained/` 也会降级随机初始化）。
+- 损坏 manifest（缺必填字段）落到 pending 而不是 TypeError 穿透；`run_summary` 读 config.yaml 容错。
+- Meiboscore 边界用精确 1/3、2/3（66.67% 不再误判为 2 级）；`mask_metrics` 的 spacing 接线到 MONAI。
+- `device.py` 支持 `cuda:N`（校验卡号存在）；doctor 提示命令拼写修正（`data_cli splits`）。
+- 流水线阶段合法性入口一次校验；resume 状态 entry 类型守卫；报告 HTML 转义病例号/模型名。
+
+**网站（xianeryijian，MIT 仓库）**
+- `getClientIp` 取 XFF 第一段可被伪造（登录限流可绕过）→ 取最右侧条目；`verifyAdminPassword` 先比长度泄漏口令长度 → 双侧 SHA-256 后常时比较；`proxy.ts`（edge）不再做签名校验（SESSION_SECRET 构建期内联风险，真校验在 action 内 requireAdmin）；备份失败清理半截文件；反馈 action 改返回值透出限流/校验提示；`pyproject.toml` license 与引擎对齐为 Apache-2.0。
+
 ### 8.3 测试与自检
 
 ```bash
@@ -416,11 +460,52 @@ python -m mgd.adapters.cli.interactive
 
 ---
 
+## 8A. 诊断中心级能力（v2.4.0，2026-11-10）
+
+在分割与量化之上，v2.4.0 新增 11 个子包，把 `mgd` 从「AI 分割工具」升级为「诊断中心级软件」：
+
+| 能力 | 子包 | 一句话 |
+|---|---|---|
+| 可追溯指标层 | `quantification/` | 16 项指标全部带定义/单位/来源注册；watershed 实例化解决 1px 黏连 |
+| 双分级体系 | `grading/` | Arita meiboscore（4 级）与 Pult Meiboscale（5 级）并排呈现，明确不可互换 |
+| 真归因 + 忠实度 | `explain/` | LayerCAM/Score-CAM/遮挡敏感度 + deletion/insertion AUC 防伪归因门 |
+| 采集质控 | `qc/` | 模糊/曝光/反光/离焦/翻转/睫毛启发式 → accept/review/reject 建议 |
+| 带保证的不确定性 | `conformal/` | split conformal 区间 + FNR/FP 风险控制阈值选择 |
+| 形态图谱 | `atlas/` | 8 类分型证据表 + 相似病例余弦检索 |
+| 随访 | `longitudinal/` | sqlite 患者/就诊/测量 + ECC 配准 + 匈牙利实例匹配 |
+| 互操作 | `interop/` | DICOM SEG/SR（可选依赖）+ FHIR R4 JSON |
+| 治理 | `governance/` | 哈希链审计日志、PHI 脱敏、RBAC、双人复核仲裁 |
+| 修正回流 | `feedback/` | 医生修正捕获 → 训练候选清单导出（不训练） |
+| 血缘 | `provenance.py` | 每份报告内嵌版本/权重 sha256/参数/校准 ID |
+
+全部能力的诚实限制见 `docs/engineering/KNOWN_LIMITATIONS.md` §10（概率伪彩≠归因、
+QC 阈值未经临床标定、engine-defined 规则无专家一致性验证、无标定时长度类指标为像素单位、
+无第二数据集）。
+
+### 新增 CLI（均支持 `--json`）
+
+```bash
+mgd-qc --image path/to/img.png [--eyelid path/to/mask.png]        # 采集质控评分与建议
+mgd-atlas describe | classify --mask m.png [--eyelid e.png] | search --mask m.png   # 形态图谱
+mgd-followup init | timeline --patient P001 | add-measurement ... | compare --patient P001  # 随访
+mgd-report --input measurements.json --html --csv [--sr out.dcm --dicom src.dcm]    # 测量报告
+mgd-logs tail|search|summary|files                                                  # 日志检索（case/run 一条 grep 定位）
+mgd-feedback record|list|summary|export                                             # 医生修正回流
+```
+
+**接线事实（v2.5.0）**：conformal 校准随每次 `mgd-eval` 自动产出并持久化（Dice 覆盖下界
++ R_loss 预测区间）；governance 审计（`logs/audit.jsonl` 哈希链）+ RBAC（`MGD_ROLE`）
++ 报告脱敏（`MGD_DEID_SALT`）已生效；DICOM SEG/SR 真实往返已验证
+（`tests/test_interop_roundtrip.py`，21 项断言）；日志系统 v2 三路输出 + 轮转。
+
+质量守卫：`./venv/Scripts/python.exe quality/run_gates.py`（18 道门禁、432 项检查）。
+
 ## 9. 交付包与启动器一致性
 
-主运行树与两个交付包的 `mgd` 代码**逐文件 SHA-256 一致**（95 个代码文件，0 diff）。包内包含：
+主运行树与两个交付包的 `mgd` 代码**逐文件 SHA-256 一致**（164 个文件，含 151 个 `.py`，0 diff）。包内包含：
 
 - 同一份 `mgd` 代码 + `mgd/packaging`；
+- 同一份 `quality/`（18 道门禁；跑门禁需 dev 依赖 `pip install -e ".[dev]"`）；
 - **6 例真实演示数据**（3 上睑 + 3 下睑），仅用于冒烟/自检；
 - 英文启动器：
   - Windows：`install_dependencies.bat` / `run_self_check.bat` / `start_webui.bat` / `start_training_cli.bat`
@@ -495,8 +580,8 @@ MGD_Project/
 │   │   └── reporting/     # HTML report
 │   ├── packaging/         # Windows/Linux install & start
 │   ├── requirements/
-│   └── tests/             # 146 tests
-├── tools/                 # 9h study / evaluation / result injection / report
+│   └── tests/             # 456 tests
+├── quality/               # 18 道质量门禁（README + run_gates.py + gates/ + checklists/）
 ├── docs/engineering/      # freeze baseline / architecture / limitations
 ├── data/                  # 999-case data (not in git)
 ├── models_weights/        # weights (not in git)
@@ -514,7 +599,7 @@ MGD_Project/
 
 ## 12. 数据与权重
 
-- **完整数据**：按 `data/images`、`data/gland_masks`、`data/eyelid_masks` 放置，运行 `mgd-data check`。患者级划分文件为 `data/dataset_splits.json`；可用 `python tools/make_patient_split.py` 重建。
+- **完整数据**：按 `data/images`、`data/gland_masks`、`data/eyelid_masks` 放置，运行 `mgd-data check`。患者级划分文件为 `data/dataset_splits.json`；删除该文件后运行 `mgd-data splits` 即按患者级规则重建。
 - **权重**：放到 `models_weights/<arch>/`，例如 `models_weights/UNet/unet_best.pth`。训练产物默认 `verified=false`；演示权重需从项目主页下载，不能当作临床验证权重。
 - **交付包**：内置 6 例演示数据；完整数据/权重单独下载。
 
@@ -590,7 +675,7 @@ MGD_Project/
 mgd-train --profile quick --vram auto
 mgd-train --config cfg.yaml --set model.name=UNet --set train.epochs=10
 mgd-train --print-schema          # 打印全部可覆盖键
-mgd-train --print-tiers           # 打印 6/8/12/16/24/40 GB 档位
+mgd-train --print-tiers           # 打印 6/8/12/16/24/32/40 GB 档位
 mgd-train --resume outputs_mgd/runs/<run>/checkpoints/<arch>_epoch_045.mgd.ckpt
 mgd-train --dry-run --json        # 只打印生效配置
 ```
@@ -730,7 +815,7 @@ loss:
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | CUDA OOM | 分块/ batch / TTA 过大 | `--vram 6`，降 tile height，关 TTA；WRCANet 开梯度检查点 |
-| `num_workers>0` 直接崩 | MONAI 变换含 lambda，不可 pickle | 固定 `num_workers=0` |
+| `num_workers>0` 直接崩 | （旧）MONAI 变换含 lambda，不可 pickle | 已修复（partial 化）；仍崩溃时降回 `num_workers=0` |
 | `.bat` 一闪而过/报非法命令 | LF 换行或非 ASCII 文件名 | 文件转 **ASCII + CRLF**；不要用中文名 |
 | 预训练加载覆盖率低 | HF 键名与本工程不一致 | 检查 `pretrained_status`；映射 `proj/layer_norm/dense1/dense2/sr` → `projection/norm/fc1/fc2/sr_conv`，去掉重复 `encoder.` |
 | val Dice 长期为 0 | EMA 0.999 在短预算下滞后 | 改 `ema_decay=0.99`，或关闭 EMA 对照 |
@@ -738,7 +823,7 @@ loss:
 | 训练结束 GPU 仍占用 | `Popen.kill()` 只杀 launcher | Windows 用 `taskkill /T /F` 杀进程树 |
 | WebUI 打不开 | 端口占用/绑定地址 | `MGD_PORT=7861`，检查 `MGD_HOST=127.0.0.1` |
 | Linux `.sh` 无执行权限 | 拷贝丢失 mode | `chmod +x install.sh run_self_check.sh start_cli.sh` |
-| 论文表里出现旧数字 | 手改了 `.tex` | 只改 `summary.json`，重跑 `tools/inject_results.py` |
+| 论文表里出现旧数字 | 手改了 `.tex` | 只改 `summary.json`，重跑本地结果注入脚本（研究脚本不随仓库分发） |
 
 ---
 
@@ -747,15 +832,18 @@ loss:
 ```text
 outputs_mgd/study_9h/eval/summary.json
         │
-        ├─ tools/inject_results.py
+        ├─ (本地研究脚本) inject_results.py
         │       └─ public/Paper/{zh,en}/data/results.tex
         │               └─ xelatex / pdflatex → main.pdf
         │
         ├─ app/docs/page.tsx（白皮书表格，人工核对后同步）
         │       └─ next build → docs.html（含 0.7771 / 0.7749）
         │
-        └─ tools/study_report.py → REPORT.md
+        └─ (本地研究脚本) study_report.py → REPORT.md
 ```
+
+> `tools/` 下的研究脚本（study 编排、结果注入、报告生成、同步）属于本机研究工作区，
+> **不随仓库分发**；仓库内只保留引擎、门禁与文档，保证他人克隆后看到的是可交付代码。
 
 规则：
 
